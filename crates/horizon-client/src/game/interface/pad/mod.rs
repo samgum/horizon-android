@@ -588,7 +588,7 @@ impl Game<'_> {
             let prev_vertical = self.touch.vertical_movement;
             self.touch.swimming = swimming;
             self.touch.vertical_movement = flying || swimming;
-            if !prev_vertical && self.touch.vertical_movement && self.toggles.0[SNEAK].down() {
+            if !prev_vertical && self.touch.vertical_movement && self.keys.held(Action::Sneak) {
                 self.toggles.0[SNEAK].set_down(false, false);
                 self.sync_toggle(SNEAK);
             }
