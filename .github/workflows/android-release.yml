@@ -1,0 +1,229 @@
+name: Android Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (leave empty to auto-name by date, e.g. 2026.11.18)"
+        required: false
+        type: string
+        default: ""
+      include_sounds:
+        description: "Bundle full vanilla 26.3 sound assets (~380 MB)"
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: "Mark GitHub Release as pre-release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build & Publish Android APK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      HORIZON_TELEMETRY_URL: "off"
+    steps:
+      - name: Reclaim unused runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/boost /opt/ghc /usr/local/share/chromium || true
+          df -h /
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve date-based release tag and version code
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          date_dot=$(TZ=Asia/Shanghai date +%Y.%m.%d)
+          date_num=$(TZ=Asia/Shanghai date +%Y%m%d)
+          if [[ -n "${INPUT_TAG}" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="${date_dot}"
+            n=2
+            while git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; do
+              tag="${date_dot}-${n}"
+              n=$((n + 1))
+            done
+          fi
+          # Monotonic versionCode: YYYYMMDD * 10 + build index within day (fits < 2,147,483,647)
+          day_seq=0
+          if [[ "$tag" =~ -([0-9]+)$ ]]; then
+            day_seq="${BASH_REMATCH[1]}"
+          fi
+          version_code=$(( date_num * 10 + (day_seq % 10) ))
+          apk_name="horizon-android-${tag}-arm64-v8a.apk"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${apk_name}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Tag: ${tag} (versionCode=${version_code})"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Temurin JDK 17 (Android DEX) & JDK 25 (horizon-prepare)
+        uses: actions/setup-java@v6
+        with:
+          distribution: "temurin"
+          java-version: |
+            17
+            25
+
+      - name: Set up Rust stable toolchain (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust build dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Ensure Android SDK Platform 35, Build-Tools 35 & NDK
+        id: android-sdk
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$SDK" -name sdkmanager -type f | head -n 1)"
+          fi
+          pkgs=()
+          [[ -f "$SDK/platforms/android-35/android.jar" ]] || pkgs+=("platforms;android-35")
+          ls -d "$SDK"/build-tools/35.* >/dev/null 2>&1 || pkgs+=("build-tools;35.0.0")
+          if ! ls -d "$SDK"/ndk/* >/dev/null 2>&1; then
+            pkgs+=("ndk;27.2.12479018")
+          fi
+          if [[ ${#pkgs[@]} -gt 0 ]]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null || true
+            "$SDKMANAGER" "${pkgs[@]}"
+          fi
+          NDK_DIR="${ANDROID_NDK_LATEST_HOME:-$(ls -1d "$SDK"/ndk/* | sort -V | tail -n 1)}"
+          TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
+          BUILD_TOOLS="$(ls -1d "$SDK"/build-tools/35.* | sort -V | tail -n 1)"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+          echo "LLVM_STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/bin/aarch64-linux-android28-clang" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_linux_android=$TOOLCHAIN/bin/aarch64-linux-android28-clang++" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/bin/aarch64-linux-android28-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384" >> "$GITHUB_ENV"
+
+      - name: Prepare Vanilla 26.3 game resources
+        env:
+          INCLUDE_SOUNDS: ${{ inputs.include_sounds }}
+        run: |
+          set -euo pipefail
+          MC_DIR="$RUNNER_TEMP/mc-26.3"
+          PREP_OUT="$RUNNER_TEMP/prepared-26.3"
+          python3 tools/android/fetch_mojang_26_3.py --lock research-lock.json --out "$MC_DIR"
+          cargo build --release -p horizon-prepare
+          extra_flags=()
+          if [[ "$INCLUDE_SOUNDS" == "true" ]]; then
+            extra_flags+=(--complete)
+          fi
+          ./target/release/horizon-prepare \
+            --prepare \
+            --root "$PWD" \
+            --minecraft-dir "$MC_DIR" \
+            --server-jar "$MC_DIR/server.jar" \
+            --java-home "$JAVA_HOME_25_X64" \
+            --output "$PREP_OUT" \
+            "${extra_flags[@]}"
+          rm -rf "$MC_DIR" .local
+          echo "PREPARED_RESOURCES_DIR=$PREP_OUT" >> "$GITHUB_ENV"
+
+      - name: Build libhorizon_android.so (arm64-v8a release)
+        env:
+          HORIZON_VERSION: ${{ steps.meta.outputs.tag }}
+          HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+        run: |
+          cargo build --release --target aarch64-linux-android -p horizon-android
+
+      - name: Package, align, sign & verify APK
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+          JAVAC: ${{ env.JAVA_HOME_17_X64 }}/bin/javac
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
+        run: |
+          set -euo pipefail
+          chmod +x tools/android/package_apk.sh
+          mkdir -p dist
+          bash tools/android/package_apk.sh \
+            --so target/aarch64-linux-android/release/libhorizon_android.so \
+            --resources-dir "$PREPARED_RESOURCES_DIR" \
+            --output "dist/${{ steps.meta.outputs.apk_name }}" \
+            --version-name "${{ steps.meta.outputs.tag }}" \
+            --version-code "${{ steps.meta.outputs.version_code }}"
+          (
+            cd dist
+            sha256sum "${{ steps.meta.outputs.apk_name }}" > "${{ steps.meta.outputs.apk_name }}.sha256"
+          )
+
+      - name: Upload APK build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.apk_name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          APK_NAME: ${{ steps.meta.outputs.apk_name }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          INCLUDE_SOUNDS: ${{ inputs.include_sounds }}
+        run: |
+          set -euo pipefail
+          SHA_LINE=$(cat "dist/${APK_NAME}.sha256")
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          cat > release_notes.md <<EOF
+          ## Horizon Android ${TAG} (SGMY Edition · Minecraft 26.3)
+
+          - **构建提交 / Commit**: \`${COMMIT_SHORT}\`
+          - **目标架构 / ABI**: \`arm64-v8a\` (Android 9.0+ / API 28–35, 16 KB page aligned)
+          - **音频资源 / Bundled Sounds**: \`${INCLUDE_SOUNDS}\`
+
+          ### 主要特性 / Highlights
+          - 默认 **摇杆 + 点按交互 (Tap)** 操控方案，支持全套 4 种触控布局、右手无重叠弧形键位、快捷栏长按丢弃与可视化布局编辑
+          - 默认 **手机基岩版风格 (Bedrock)** 容器触控（长按绿色比例分堆条 + 侧边快速转移/对半/丢弃栏 + 滚动防误拿），可在设置切换为经典风格
+          - 支持 **免登录离线直连测试** 与 **微软设备码正版登录**（`AndroidKeyStore` 硬件加密续期）双模式热切换
+          - 支持顶部停靠 / 跟随键盘双模式中文输入法聊天栏、挖孔安全区自适应与防拉伸防呆开屏预热
+
+          ### 校验值 / SHA-256
+          \`\`\`text
+          ${SHA_LINE}
+          \`\`\`
+          EOF
+
+          flags=(--title "Horizon Android ${TAG}" --notes-file release_notes.md --target "${GITHUB_SHA}")
+          if [[ "$PRERELEASE" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" "dist/${APK_NAME}" "dist/${APK_NAME}.sha256" "${flags[@]}"
