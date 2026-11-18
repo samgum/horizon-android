@@ -18,8 +18,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$SO_PATH" || -z "$RESOURCES_DIR" || -z "$OUTPUT_APK" ]]; then
-  echo "usage: $0 --so <libhorizon_android.so> --resources-dir <prepared_dir> --output <out.apk> [--version-name <str>] [--version-code <int>]" >&2
+if [[ -z "$SO_PATH" || -z "$OUTPUT_APK" ]]; then
+  echo "usage: $0 --so <libhorizon_android.so> --output <out.apk> [--resources-dir <optional_local_prepared_dir>] [--version-name <str>] [--version-code <int>]" >&2
   exit 2
 fi
 
@@ -34,11 +34,6 @@ fi
 
 if [[ ! -f "$ANDROID_JAR" || ! -x "$BUILD_TOOLS/aapt2" ]]; then
   echo "Android SDK platform 35 or build-tools not found under $SDK_ROOT" >&2
-  exit 1
-fi
-
-if [[ ! -f "$RESOURCES_DIR/horizon-resources.json" ]]; then
-  echo "Prepared resources missing horizon-resources.json in $RESOURCES_DIR" >&2
   exit 1
 fi
 
@@ -60,14 +55,14 @@ echo "[apk] compiling Android XML resources with aapt2..."
   -o "$WORK_DIR/unsigned.apk" \
   "$WORK_DIR/res.zip"
 
-echo "[apk] compiling HorizonActivity.java -> classes.dex..."
-mkdir -p "$WORK_DIR/classes" "$WORK_DIR/stage/lib/arm64-v8a" "$WORK_DIR/stage/assets"
+echo "[apk] compiling Java Activities -> classes.dex..."
+mkdir -p "$WORK_DIR/classes" "$WORK_DIR/stage/lib/arm64-v8a"
 "$JAVAC_BIN" \
   -encoding UTF-8 \
   -source 8 -target 8 \
   -bootclasspath "$ANDROID_JAR" \
   -d "$WORK_DIR/classes" \
-  "$REPO_ROOT/android-apk/src/dev/horizon/android/HorizonActivity.java"
+  "$REPO_ROOT/android-apk/src/dev/horizon/android/"*.java
 
 "$BUILD_TOOLS/d8" \
   --min-api 28 \
@@ -81,17 +76,26 @@ if [[ -n "${LLVM_STRIP:-}" && -x "${LLVM_STRIP}" ]]; then
   "$LLVM_STRIP" --strip-debug "$WORK_DIR/stage/lib/arm64-v8a/libhorizon_android.so" || true
 fi
 
-echo "[apk] archiving prepared resources into assets/resources.zip..."
-(
-  cd "$RESOURCES_DIR"
-  zip -qr -6 "$WORK_DIR/stage/assets/resources.zip" . -x ".horizon-prepare.lock"
-)
+if [[ -n "$RESOURCES_DIR" ]]; then
+  if [[ ! -f "$RESOURCES_DIR/horizon-resources.json" ]]; then
+    echo "Prepared resources missing horizon-resources.json in $RESOURCES_DIR" >&2
+    exit 1
+  fi
+  echo "[apk] archiving local private resources into assets/resources.zip..."
+  mkdir -p "$WORK_DIR/stage/assets"
+  (
+    cd "$RESOURCES_DIR"
+    zip -qr -6 "$WORK_DIR/stage/assets/resources.zip" . -x ".horizon-prepare.lock"
+  )
+fi
 
-echo "[apk] merging DEX, native arm64 library, and assets into APK..."
+echo "[apk] merging DEX and native arm64 library into APK..."
 (
   cd "$WORK_DIR/stage"
   zip -q -g "$WORK_DIR/unsigned.apk" classes.dex lib/arm64-v8a/libhorizon_android.so
-  zip -q -0 -g "$WORK_DIR/unsigned.apk" assets/resources.zip
+  if [[ -f "assets/resources.zip" ]]; then
+    zip -q -0 -g "$WORK_DIR/unsigned.apk" assets/resources.zip
+  fi
 )
 
 echo "[apk] aligning APK (16 KB page alignment)..."

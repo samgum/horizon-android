@@ -751,9 +751,16 @@ fn extract_bundled_resources(app: &AndroidApp, target_dir: &Path) -> Result<(), 
     notify_java_boot_progress("首次启动：正在解压游戏资源 (0%)…", 2);
     fs::create_dir_all(target_dir).map_err(|e| format!("create resources dir: {e}"))?;
     let assets = app.asset_manager();
-    let asset = assets
-        .open(c"resources.zip")
-        .ok_or_else(|| "missing assets/resources.zip in APK".to_owned())?;
+    let Some(asset) = assets.open(c"resources.zip") else {
+        if target_dir.join("horizon-resources.json").is_file() {
+            let _ = fs::write(&marker, b"ok");
+            notify_java_boot_progress("正在启动引擎…", 18);
+            return Ok(());
+        }
+        return Err(
+            "未检测到游戏资源 (resources/26.3)，请返回启动引导页选择本地 resources.zip 导入".to_owned(),
+        );
+    };
     let mut archive =
         zip::ZipArchive::new(asset).map_err(|e| format!("open resources.zip: {e}"))?;
 

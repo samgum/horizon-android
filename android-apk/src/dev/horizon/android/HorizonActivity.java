@@ -781,6 +781,28 @@ public class HorizonActivity extends NativeActivity {
             }
         });
         cidRow.addView(pasteSessionBtn, obLp);
+
+        Button reimportResBtn = styledButton("重新导入资源包", 0xFF1E293B, 0xFF475569, 0xFFCBD5E1);
+        reimportResBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    java.io.File marker = new java.io.File(
+                        new java.io.File(new java.io.File(getFilesDir(), "resources"), "26.3"),
+                        ".extracted_26_3"
+                    );
+                    if (marker.exists()) {
+                        marker.delete();
+                    }
+                    Intent intent = new Intent(HorizonActivity.this, HorizonLaunchActivity.class);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                    startActivity(intent);
+                    Runtime.getRuntime().exit(0);
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        cidRow.addView(reimportResBtn, obLp);
         advCard.addView(cidRow, cidRowLp);
     }
 

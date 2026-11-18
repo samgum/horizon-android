@@ -61,7 +61,7 @@
 
 ## Requirements
 
-1. **Your own legal copy of *Minecraft: Java Edition 26.3***: Horizon ships **no** proprietary Mojang assets. Prepare resources first with `horizon-prepare` and bundle them as `assets/resources.zip` when packaging your APK.
+1. **Your own legal copy of *Minecraft: Java Edition 26.3***: Horizon ships **no** proprietary Mojang assets in the repository or in GitHub Release APKs. Prepare resources from your own copy of 26.3 with `horizon-prepare`, archive the output as `resources.zip`, and select it via the on-device file picker on first launch.
 2. **Android Device**: Android 9.0+ (`minSdkVersion 28`, `targetSdkVersion 35`), `arm64-v8a`, with Vulkan 1.1+ or OpenGL ES 3.2 support.
 3. **Build Toolchain**:
    - Rust nightly/workspace toolchain (`aarch64-linux-android` target)

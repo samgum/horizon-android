@@ -26,19 +26,27 @@
         android:resizeableActivity="true"
         android:theme="@style/HorizonTheme">
         <activity
-            android:name="dev.horizon.android.HorizonActivity"
+            android:name="dev.horizon.android.HorizonLaunchActivity"
             android:label="Horizon 26.3"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density|uiMode"
             android:exported="true">
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="horizon_android" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+        <activity
+            android:name="dev.horizon.android.HorizonActivity"
+            android:label="Horizon 26.3"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density|uiMode"
+            android:exported="false">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="horizon_android" />
         </activity>
     </application>
 </manifest>

@@ -62,7 +62,7 @@
 
 ## 环境与前置要求
 
-1. **正版 *Minecraft: Java Edition 26.3* 游戏本体**：本仓库**不包含**任何受版权保护的 Mojang 游戏资产。打包 APK 前需先在电脑端通过正版启动器下载并运行一次 26.3，使用 `horizon-prepare` 生成资源目录后压缩为 `assets/resources.zip`。
+1. **正版 *Minecraft: Java Edition 26.3* 游戏本体**：本仓库及 GitHub Release 安装包**均不包含**任何受版权保护的 Mojang 游戏资产。请先在已安装正版 26.3 的电脑端使用 `horizon-prepare` 生成资源目录并压缩为 `resources.zip` 传至手机，首次启动 APK 时点击按钮在系统文件选择器中选中 `resources.zip` 即可导入。
 2. **Android 运行设备**：Android 9.0 及以上（`minSdkVersion 28`，`targetSdkVersion 35`），`arm64-v8a` 64 位架构，支持 Vulkan 1.1+ 或 OpenGL ES 3.2。
 3. **构建工具链**：
    - Rust 工具链（安装 `aarch64-linux-android` 编译目标）
