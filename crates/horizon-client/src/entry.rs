@@ -59,6 +59,13 @@ static ANDROID_BOOT_DISMISSED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "android")]
+static ANDROID_ACCOUNT_DIALOG_CALLBACK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_PENDING_PLAYER_NAME: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "android")]
 pub fn set_android_app(app: android_activity::AndroidApp) {
     let _ = ANDROID_APP.set(app);
 }
@@ -82,6 +89,33 @@ pub fn set_android_toast_callback(cb: fn(&str)) {
 pub fn set_android_boot_callbacks(progress: fn(&str, i32), ready: fn()) {
     let _ = ANDROID_BOOT_PROGRESS_CALLBACK.set(progress);
     let _ = ANDROID_BOOT_READY_CALLBACK.set(ready);
+}
+
+#[cfg(target_os = "android")]
+pub fn set_android_account_dialog_callback(cb: fn()) {
+    let _ = ANDROID_ACCOUNT_DIALOG_CALLBACK.set(cb);
+}
+
+#[cfg(target_os = "android")]
+pub fn push_android_player_name(name: String) {
+    if let Ok(mut slot) = ANDROID_PENDING_PLAYER_NAME.lock() {
+        *slot = Some(name);
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn take_android_player_name() -> Option<String> {
+    ANDROID_PENDING_PLAYER_NAME
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn notify_android_open_account_dialog() {
+    if let Some(cb) = ANDROID_ACCOUNT_DIALOG_CALLBACK.get() {
+        cb();
+    }
 }
 
 #[cfg(target_os = "android")]

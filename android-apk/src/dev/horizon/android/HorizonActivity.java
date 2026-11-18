@@ -1,9 +1,13 @@
 package dev.horizon.android;
 
+import android.app.AlertDialog;
 import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -12,12 +16,18 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.text.InputType;
+import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.view.DisplayCutout;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -31,14 +41,44 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 import android.window.SplashScreen;
 import android.window.SplashScreenView;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+
 public class HorizonActivity extends NativeActivity {
+    private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
+    private static final String KEYSTORE_ALIAS = "horizon_msa_secrets_v1";
+    private static final String SECRETS_PREFS = "horizon_auth_secrets";
+
     private InputBridgeView imeView;
     private BootSplashView bootSplashView;
     private ClipboardManager clipboardManager;
+    private SharedPreferences secretPrefs;
+    private AlertDialog accountDialog;
+    private LinearLayout accountDialogRoot;
+    private TextView signInStatusView;
+    private TextView signInCodeView;
+    private Button openBrowserBtn;
+    private Button cancelSignInBtn;
+    private volatile String currentVerificationUri = "https://www.microsoft.com/link";
+    private volatile String currentUserCode = "";
+
     private volatile boolean imeRequested = false;
     private volatile String latestBootStage = "正在启动 Horizon…";
     private volatile int latestBootPercent = 4;
@@ -56,6 +96,15 @@ public class HorizonActivity extends NativeActivity {
         int gestureRight,
         int imeBottom
     );
+    private static native String nativeGetAccountStateJson();
+    private static native String nativeSetOfflineMode(String offlineName);
+    private static native void nativeSetCustomClientId(String clientId);
+    private static native String nativeSelectMicrosoftAccount(String uuid);
+    private static native void nativeRefreshMicrosoftAccount(String uuid);
+    private static native void nativeRemoveMicrosoftAccount(String uuid);
+    private static native void nativeStartMsaSignIn(String clientIdOverride);
+    private static native void nativeCancelMsaSignIn();
+    private static native String nativeImportSessionJson(String jsonText);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,6 +121,7 @@ public class HorizonActivity extends NativeActivity {
         }
         super.onCreate(savedInstanceState);
         clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        secretPrefs = getSharedPreferences(SECRETS_PREFS, Context.MODE_PRIVATE);
         imeView = new InputBridgeView(this);
         imeView.setFocusable(true);
         imeView.setFocusableInTouchMode(true);
@@ -95,7 +145,7 @@ public class HorizonActivity extends NativeActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && !imeRequested) {
+        if (hasFocus && !imeRequested && (accountDialog == null || !accountDialog.isShowing())) {
             configureImmersiveWindow();
         }
     }
@@ -174,6 +224,582 @@ public class HorizonActivity extends NativeActivity {
                 }
                 nativeOnWindowInsets(cLeft, cTop, cRight, cBottom, gLeft, gRight, imeBottom);
                 return insets;
+            }
+        });
+    }
+
+    // ----- Android Hardware Keystore Vault (AES-256-GCM) -----------------------------------------
+
+    private synchronized SecretKey getOrCreateVaultKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance(KEYSTORE_PROVIDER);
+        ks.load(null);
+        KeyStore.Entry existing = ks.getEntry(KEYSTORE_ALIAS, null);
+        if (existing instanceof KeyStore.SecretKeyEntry) {
+            return ((KeyStore.SecretKeyEntry) existing).getSecretKey();
+        }
+        KeyGenerator kg = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            KEYSTORE_PROVIDER
+        );
+        KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+            KEYSTORE_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build();
+        kg.init(spec);
+        return kg.generateKey();
+    }
+
+    public synchronized void sealSecret(String key, String plaintext) {
+        if (key == null || plaintext == null || secretPrefs == null) return;
+        try {
+            SecretKey secretKey = getOrCreateVaultKey();
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+            byte[] iv = cipher.getIV();
+            byte[] encrypted = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
+            String blob = Base64.encodeToString(iv, Base64.NO_WRAP)
+                + ":"
+                + Base64.encodeToString(encrypted, Base64.NO_WRAP);
+            secretPrefs.edit().putString(key, blob).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public synchronized String openSecret(String key) {
+        if (key == null || secretPrefs == null) return "";
+        try {
+            String blob = secretPrefs.getString(key, null);
+            if (blob == null || blob.isEmpty()) return "";
+            int sep = blob.indexOf(':');
+            if (sep <= 0) return "";
+            byte[] iv = Base64.decode(blob.substring(0, sep), Base64.NO_WRAP);
+            byte[] encrypted = Base64.decode(blob.substring(sep + 1), Base64.NO_WRAP);
+            SecretKey secretKey = getOrCreateVaultKey();
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, new GCMParameterSpec(128, iv));
+            byte[] plain = cipher.doFinal(encrypted);
+            return new String(plain, StandardCharsets.UTF_8);
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    public synchronized void deleteSecret(String key) {
+        if (key == null || secretPrefs == null) return;
+        try {
+            secretPrefs.edit().remove(key).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ----- Account Center Dialog (Offline Testing + Microsoft Genuine Sign-In) -------------------
+
+    private int dpPx(float dpVal) {
+        return Math.round(dpVal * getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable roundedBox(int fillArgb, int strokeArgb, float radiusDp) {
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(fillArgb);
+        gd.setCornerRadius(dpPx(radiusDp));
+        if (strokeArgb != 0) {
+            gd.setStroke(Math.max(1, dpPx(1f)), strokeArgb);
+        }
+        return gd;
+    }
+
+    private Button styledButton(String text, int bgArgb, int strokeArgb, int textArgb) {
+        Button b = new Button(this);
+        b.setAllCaps(false);
+        b.setText(text);
+        b.setTextColor(textArgb);
+        b.setTextSize(13f);
+        b.setPadding(dpPx(12), dpPx(6), dpPx(12), dpPx(6));
+        b.setMinimumHeight(dpPx(36));
+        b.setMinHeight(dpPx(36));
+        b.setBackground(roundedBox(bgArgb, strokeArgb, 6f));
+        return b;
+    }
+
+    public void openAccountCenterDialog() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                showOrRefreshAccountDialog();
+            }
+        });
+    }
+
+    public void onMsaSignInUpdate(
+        final String status,
+        final String userCode,
+        final String verificationUri,
+        final boolean inProgress,
+        final boolean completed
+    ) {
+        if (verificationUri != null && !verificationUri.isEmpty()) {
+            currentVerificationUri = verificationUri;
+        }
+        if (userCode != null) {
+            currentUserCode = userCode;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (completed) {
+                    if (accountDialog != null && accountDialog.isShowing()) {
+                        rebuildAccountDialogContents();
+                    }
+                }
+                if (signInStatusView != null && status != null && !status.isEmpty()) {
+                    signInStatusView.setVisibility(View.VISIBLE);
+                    signInStatusView.setText(status);
+                }
+                if (signInCodeView != null) {
+                    if (userCode != null && !userCode.isEmpty()) {
+                        signInCodeView.setVisibility(View.VISIBLE);
+                        signInCodeView.setText("设备验证码:  " + userCode);
+                    } else if (!inProgress) {
+                        signInCodeView.setVisibility(View.GONE);
+                    }
+                }
+                if (openBrowserBtn != null) {
+                    openBrowserBtn.setVisibility(
+                        (inProgress && userCode != null && !userCode.isEmpty())
+                            ? View.VISIBLE
+                            : View.GONE
+                    );
+                }
+                if (cancelSignInBtn != null) {
+                    cancelSignInBtn.setVisibility(inProgress ? View.VISIBLE : View.GONE);
+                }
+            }
+        });
+    }
+
+    private void showOrRefreshAccountDialog() {
+        if (isFinishing()) return;
+        if (accountDialog != null && accountDialog.isShowing()) {
+            rebuildAccountDialogContents();
+            return;
+        }
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackground(roundedBox(0xFF11151E, 0xFF2B3548, 10f));
+
+        accountDialogRoot = new LinearLayout(this);
+        accountDialogRoot.setOrientation(LinearLayout.VERTICAL);
+        int pad = dpPx(16);
+        accountDialogRoot.setPadding(pad, dpPx(14), pad, dpPx(14));
+        scroll.addView(accountDialogRoot);
+
+        rebuildAccountDialogContents();
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setView(scroll);
+        accountDialog = builder.create();
+        accountDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface dialog) {
+                configureImmersiveWindow();
+            }
+        });
+        if (accountDialog.getWindow() != null) {
+            accountDialog.getWindow().setBackgroundDrawable(roundedBox(0x00000000, 0, 10f));
+        }
+        accountDialog.show();
+        if (accountDialog.getWindow() != null) {
+            int maxW = Math.min(getResources().getDisplayMetrics().widthPixels - dpPx(32), dpPx(540));
+            accountDialog.getWindow().setLayout(maxW, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private void rebuildAccountDialogContents() {
+        if (accountDialogRoot == null) return;
+        accountDialogRoot.removeAllViews();
+
+        String mode = "offline";
+        String offlineName = "Player";
+        String customClientId = "";
+        boolean hasBuiltinCid = false;
+        JSONArray accounts = new JSONArray();
+        try {
+            JSONObject st = new JSONObject(nativeGetAccountStateJson());
+            mode = st.optString("mode", "offline");
+            offlineName = st.optString("offline_name", "Player");
+            customClientId = st.optString("custom_client_id", "");
+            hasBuiltinCid = st.optBoolean("has_builtin_client_id", false);
+            JSONArray arr = st.optJSONArray("accounts");
+            if (arr != null) accounts = arr;
+        } catch (Throwable ignored) {
+        }
+
+        // Header row
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView title = new TextView(this);
+        title.setText("账号模式管理（离线直连 / 微软正版）");
+        title.setTextColor(0xFFF8FAFC);
+        title.setTextSize(16f);
+        title.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        );
+        header.addView(title, titleLp);
+
+        Button closeBtn = styledButton("完成", 0xFF1E293B, 0xFF475569, 0xFFE2E8F0);
+        closeBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (accountDialog != null) accountDialog.dismiss();
+            }
+        });
+        header.addView(closeBtn);
+        accountDialogRoot.addView(header);
+
+        // Card 1: Offline Mode (preserved & instant for local testing!)
+        LinearLayout offlineCard = new LinearLayout(this);
+        offlineCard.setOrientation(LinearLayout.VERTICAL);
+        int isOff = "offline".equals(mode) ? 1 : 0;
+        offlineCard.setBackground(
+            roundedBox(0xFF18202F, isOff == 1 ? 0xFFFACC15 : 0xFF2B3548, 8f)
+        );
+        offlineCard.setPadding(dpPx(12), dpPx(10), dpPx(12), dpPx(10));
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        cardLp.topMargin = dpPx(10);
+        accountDialogRoot.addView(offlineCard, cardLp);
+
+        TextView offTitle = new TextView(this);
+        offTitle.setText(
+            isOff == 1
+                ? "● 离线测试模式（当前使用中 · 免登录直接进游戏）"
+                : "○ 离线测试模式（免登录直接测试单机与离线服）"
+        );
+        offTitle.setTextColor(isOff == 1 ? 0xFFFDE047 : 0xFFCBD5E1);
+        offTitle.setTextSize(13.5f);
+        offTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        offlineCard.addView(offTitle);
+
+        LinearLayout offRow = new LinearLayout(this);
+        offRow.setOrientation(LinearLayout.HORIZONTAL);
+        offRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams offRowLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        offRowLp.topMargin = dpPx(8);
+
+        final EditText offInput = new EditText(this);
+        offInput.setSingleLine(true);
+        offInput.setText(offlineName);
+        offInput.setHint("离线玩家名 (1~16位字母/数字/_)");
+        offInput.setHintTextColor(0xFF64748B);
+        offInput.setTextColor(0xFFF8FAFC);
+        offInput.setTextSize(13.5f);
+        offInput.setPadding(dpPx(10), dpPx(6), dpPx(10), dpPx(6));
+        offInput.setBackground(roundedBox(0xFF0D121B, 0xFF334155, 6f));
+        offInput.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_ACTION_DONE);
+        LinearLayout.LayoutParams offInLp = new LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        );
+        offInLp.rightMargin = dpPx(8);
+        offRow.addView(offInput, offInLp);
+
+        Button applyOffBtn = styledButton(
+            isOff == 1 ? "保存离线名" : "切换为离线模式",
+            0xFF334155,
+            0xFFFACC15,
+            0xFFFEF08A
+        );
+        applyOffBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String err = nativeSetOfflineMode(offInput.getText().toString());
+                if (err != null && !err.isEmpty()) {
+                    Toast.makeText(HorizonActivity.this, err, Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(
+                        HorizonActivity.this,
+                        "已启用离线模式: " + offInput.getText().toString().trim(),
+                        Toast.LENGTH_SHORT
+                    ).show();
+                    rebuildAccountDialogContents();
+                }
+            }
+        });
+        offRow.addView(applyOffBtn);
+        offlineCard.addView(offRow, offRowLp);
+
+        // Card 2: Microsoft Genuine Accounts & Device-Code Sign-In
+        LinearLayout msaCard = new LinearLayout(this);
+        msaCard.setOrientation(LinearLayout.VERTICAL);
+        msaCard.setBackground(
+            roundedBox(0xFF18202F, isOff == 0 ? 0xFF4ADE80 : 0xFF2B3548, 8f)
+        );
+        msaCard.setPadding(dpPx(12), dpPx(10), dpPx(12), dpPx(10));
+        accountDialogRoot.addView(msaCard, cardLp);
+
+        TextView msaTitle = new TextView(this);
+        msaTitle.setText("微软正版账号（支持正版验证服务器、正版皮肤与自动续期）");
+        msaTitle.setTextColor(0xFF86EFAC);
+        msaTitle.setTextSize(13.5f);
+        msaTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        msaCard.addView(msaTitle);
+
+        for (int i = 0; i < accounts.length(); i++) {
+            JSONObject acc = accounts.optJSONObject(i);
+            if (acc == null) continue;
+            final String uuid = acc.optString("uuid", "");
+            final String name = acc.optString("name", "Player");
+            final boolean active = acc.optBoolean("active", false);
+            final boolean onlineReady = acc.optBoolean("online_ready", false);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dpPx(10), dpPx(6), dpPx(10), dpPx(6));
+            row.setBackground(roundedBox(0xFF0F1623, active ? 0xFF4ADE80 : 0xFF263145, 6f));
+            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            rlp.topMargin = dpPx(6);
+
+            TextView label = new TextView(this);
+            String badge = active
+                ? (onlineReady ? "✓ 当前正版在线: " : "● 当前账号 (待刷新): ")
+                : "正版账号: ";
+            label.setText(badge + name);
+            label.setTextColor(active ? 0xFF4ADE80 : 0xFFE2E8F0);
+            label.setTextSize(13f);
+            row.addView(
+                label,
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            );
+
+            if (!active) {
+                Button useBtn = styledButton("切换", 0xFF14532D, 0xFF4ADE80, 0xFFDCFCE7);
+                useBtn.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        String note = nativeSelectMicrosoftAccount(uuid);
+                        if (note != null && !note.isEmpty()) {
+                            Toast.makeText(HorizonActivity.this, note, Toast.LENGTH_LONG).show();
+                        } else {
+                            Toast.makeText(
+                                HorizonActivity.this,
+                                "已切换为正版账号: " + name,
+                                Toast.LENGTH_SHORT
+                            ).show();
+                        }
+                        rebuildAccountDialogContents();
+                    }
+                });
+                row.addView(useBtn);
+            } else {
+                Button refreshBtn = styledButton("刷新令牌", 0xFF1E3A8A, 0xFF60A5FA, 0xFFDBEAFE);
+                refreshBtn.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        Toast.makeText(HorizonActivity.this, "正在后台刷新令牌…", Toast.LENGTH_SHORT).show();
+                        nativeRefreshMicrosoftAccount(uuid);
+                    }
+                });
+                row.addView(refreshBtn);
+            }
+
+            Button removeBtn = styledButton("退出", 0xFF3F1D24, 0xFFF87171, 0xFFFECACA);
+            LinearLayout.LayoutParams rmLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            rmLp.leftMargin = dpPx(6);
+            removeBtn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    nativeRemoveMicrosoftAccount(uuid);
+                    rebuildAccountDialogContents();
+                }
+            });
+            row.addView(removeBtn, rmLp);
+            msaCard.addView(row, rlp);
+        }
+
+        // Device-code sign-in controls & live status
+        final EditText cidInput = new EditText(this);
+        cidInput.setSingleLine(true);
+        cidInput.setText(customClientId);
+        cidInput.setHint(
+            hasBuiltinCid
+                ? "可选：自定义 Azure Client ID（留空使用内置配置）"
+                : "填入 Azure 应用 Client ID (开启 Allow public client flows)"
+        );
+        cidInput.setHintTextColor(0xFF64748B);
+        cidInput.setTextColor(0xFFE2E8F0);
+        cidInput.setTextSize(12f);
+        cidInput.setPadding(dpPx(10), dpPx(6), dpPx(10), dpPx(6));
+        cidInput.setBackground(roundedBox(0xFF0D121B, 0xFF334155, 6f));
+        cidInput.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_ACTION_DONE);
+
+        LinearLayout signInBtnRow = new LinearLayout(this);
+        signInBtnRow.setOrientation(LinearLayout.HORIZONTAL);
+        signInBtnRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams sbrLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        sbrLp.topMargin = dpPx(8);
+
+        Button addMsaBtn = styledButton(
+            "+ 微软设备码正版登录",
+            0xFF166534,
+            0xFF4ADE80,
+            0xFFF0FDF4
+        );
+        addMsaBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                nativeStartMsaSignIn(cidInput.getText().toString());
+            }
+        });
+        signInBtnRow.addView(addMsaBtn);
+
+        openBrowserBtn = styledButton(
+            "复制验证码并打开浏览器",
+            0xFF1D4ED8,
+            0xFF60A5FA,
+            0xFFEFF6FF
+        );
+        openBrowserBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams obLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        obLp.leftMargin = dpPx(8);
+        openBrowserBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (currentUserCode != null && !currentUserCode.isEmpty()) {
+                    setClipboardText(currentUserCode);
+                }
+                openBrowserUrl(currentVerificationUri);
+            }
+        });
+        signInBtnRow.addView(openBrowserBtn, obLp);
+
+        cancelSignInBtn = styledButton("取消", 0xFF334155, 0xFF94A3B8, 0xFFE2E8F0);
+        cancelSignInBtn.setVisibility(View.GONE);
+        cancelSignInBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                nativeCancelMsaSignIn();
+                if (signInStatusView != null) signInStatusView.setText("已取消登录。");
+                if (signInCodeView != null) signInCodeView.setVisibility(View.GONE);
+                openBrowserBtn.setVisibility(View.GONE);
+                cancelSignInBtn.setVisibility(View.GONE);
+            }
+        });
+        signInBtnRow.addView(cancelSignInBtn, obLp);
+        msaCard.addView(signInBtnRow, sbrLp);
+
+        signInCodeView = new TextView(this);
+        signInCodeView.setVisibility(View.GONE);
+        signInCodeView.setTextColor(0xFF4ADE80);
+        signInCodeView.setTextSize(17f);
+        signInCodeView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        signInCodeView.setPadding(0, dpPx(8), 0, dpPx(2));
+        msaCard.addView(signInCodeView);
+
+        signInStatusView = new TextView(this);
+        signInStatusView.setVisibility(View.GONE);
+        signInStatusView.setTextColor(0xFFCBD5E1);
+        signInStatusView.setTextSize(12.5f);
+        signInStatusView.setPadding(0, dpPx(4), 0, dpPx(2));
+        msaCard.addView(signInStatusView);
+
+        // Card 3: Advanced Client ID & Debug Session JSON Import
+        LinearLayout advCard = new LinearLayout(this);
+        advCard.setOrientation(LinearLayout.VERTICAL);
+        advCard.setBackground(roundedBox(0xFF141B27, 0xFF263145, 8f));
+        advCard.setPadding(dpPx(12), dpPx(8), dpPx(12), dpPx(10));
+        accountDialogRoot.addView(advCard, cardLp);
+
+        TextView advTitle = new TextView(this);
+        advTitle.setText("高级 / 开发者配置（Azure Client ID & 调试会话导入）");
+        advTitle.setTextColor(0xFF94A3B8);
+        advTitle.setTextSize(12f);
+        advCard.addView(advTitle);
+
+        LinearLayout cidRow = new LinearLayout(this);
+        cidRow.setOrientation(LinearLayout.HORIZONTAL);
+        cidRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams cidRowLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        cidRowLp.topMargin = dpPx(6);
+        cidRow.addView(cidInput, offInLp);
+
+        Button saveCidBtn = styledButton("保存 ID", 0xFF1E293B, 0xFF475569, 0xFFCBD5E1);
+        saveCidBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                nativeSetCustomClientId(cidInput.getText().toString());
+                Toast.makeText(HorizonActivity.this, "已保存 Client ID 配置", Toast.LENGTH_SHORT).show();
+            }
+        });
+        cidRow.addView(saveCidBtn);
+
+        Button pasteSessionBtn = styledButton("从剪贴板导入 Session", 0xFF1E293B, 0xFF475569, 0xFFCBD5E1);
+        pasteSessionBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String clip = getClipboardText();
+                if (clip == null || clip.trim().isEmpty()) {
+                    Toast.makeText(HorizonActivity.this, "剪贴板为空", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                String err = nativeImportSessionJson(clip);
+                if (err != null && !err.isEmpty()) {
+                    Toast.makeText(HorizonActivity.this, err, Toast.LENGTH_LONG).show();
+                } else {
+                    rebuildAccountDialogContents();
+                }
+            }
+        });
+        cidRow.addView(pasteSessionBtn, obLp);
+        advCard.addView(cidRow, cidRowLp);
+    }
+
+    public void openBrowserUrl(final String url) {
+        if (url == null || url.isEmpty()) return;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(intent);
+                } catch (Throwable e) {
+                    Toast.makeText(
+                        HorizonActivity.this,
+                        "无法拉起浏览器，请手动访问: " + url,
+                        Toast.LENGTH_LONG
+                    ).show();
+                }
             }
         });
     }
@@ -402,7 +1028,6 @@ public class HorizonActivity extends NativeActivity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
-            // Foolproof guard: swallow stray touches while unpacking resources or compiling shaders.
             return !bootDismissed;
         }
 
@@ -435,7 +1060,10 @@ public class HorizonActivity extends NativeActivity {
 
             float target = Math.max(0f, Math.min(100f, (float) latestBootPercent));
             if (displayedPercent < target) {
-                displayedPercent = Math.min(target, displayedPercent + Math.max(0.6f, (target - displayedPercent) * 0.22f));
+                displayedPercent = Math.min(
+                    target,
+                    displayedPercent + Math.max(0.6f, (target - displayedPercent) * 0.22f)
+                );
             } else {
                 displayedPercent = target;
             }
@@ -452,7 +1080,6 @@ public class HorizonActivity extends NativeActivity {
             fillRect.set(barLeft, barTop, Math.min(barLeft + barW, barLeft + fillW), barTop + barH);
             canvas.drawRoundRect(fillRect, barR, barR, barFillPaint);
 
-            // Subtle moving shimmer so long shader compilation never looks frozen.
             float phase = (SystemClock.uptimeMillis() % 1400L) / 1400f;
             float pulseW = Math.min(fillRect.width() * 0.35f, 48f * dp);
             if (pulseW > 4f * dp) {

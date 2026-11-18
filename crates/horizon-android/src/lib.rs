@@ -1,6 +1,8 @@
 use android_activity::AndroidApp;
+use horizon_client::auth::msa;
 use horizon_client::entry::{
-    AndroidImeEvent, AndroidWindowInsets, push_android_ime, set_android_boot_callbacks,
+    AndroidImeEvent, AndroidWindowInsets, push_android_ime, push_android_player_name,
+    set_android_account_dialog_callback, set_android_boot_callbacks,
     set_android_clipboard_callbacks, set_android_ime_callback, set_android_keep_screen_on_callback,
     set_android_toast_callback, set_android_window_insets,
 };
@@ -10,8 +12,20 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static ANDROID_APP_FOR_IME: OnceLock<AndroidApp> = OnceLock::new();
+static ANDROID_GAME_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Incremented on every sign-in start or cancel so superseded pollers stop immediately.
+static MSA_SIGNIN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn game_dir_path() -> PathBuf {
+    ANDROID_GAME_DIR
+        .get()
+        .cloned()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("/data/local/tmp/horizon/game"))
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeOnImeCommit(
@@ -75,6 +89,266 @@ pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeOnWindowIn
     });
 }
 
+fn new_jstring_or_null<'a>(env: &mut JNIEnv<'a>, text: &str) -> jni::sys::jstring {
+    env.new_string(text)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeGetAccountStateJson(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jstring {
+    let json = msa::ui_state_json(&game_dir_path());
+    new_jstring_or_null(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeSetOfflineMode(
+    mut env: JNIEnv,
+    _class: JClass,
+    offline_name: JString,
+) -> jni::sys::jstring {
+    let raw: String = env
+        .get_string(&offline_name)
+        .map(Into::into)
+        .unwrap_or_default();
+    let Some(clean) = msa::sanitize_offline_name(&raw) else {
+        return new_jstring_or_null(
+            &mut env,
+            "离线玩家名需为 1~16 位英文字母、数字或下划线 (_)。",
+        );
+    };
+    let dir = game_dir_path();
+    let mut store = msa::AccountStore::load(&dir);
+    store.offline_name = clean.clone();
+    store.mode = msa::AccountMode::Offline;
+    if let Err(e) = store.save(&dir) {
+        return new_jstring_or_null(&mut env, &format!("保存账号配置失败: {e}"));
+    }
+    let resolved = msa::resolve_and_activate(&dir, &msa::Endpoints::live(), false);
+    push_android_player_name(resolved.player_name);
+    new_jstring_or_null(&mut env, "")
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeSetCustomClientId(
+    mut env: JNIEnv,
+    _class: JClass,
+    client_id: JString,
+) {
+    let cid: String = env
+        .get_string(&client_id)
+        .map(Into::into)
+        .unwrap_or_default();
+    let dir = game_dir_path();
+    let mut store = msa::AccountStore::load(&dir);
+    store.custom_client_id = cid.trim().to_owned();
+    let _ = store.save(&dir);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeSelectMicrosoftAccount(
+    mut env: JNIEnv,
+    _class: JClass,
+    uuid: JString,
+) -> jni::sys::jstring {
+    let uid: String = env.get_string(&uuid).map(Into::into).unwrap_or_default();
+    let norm = uid.replace('-', "").to_lowercase();
+    let dir = game_dir_path();
+    let mut store = msa::AccountStore::load(&dir);
+    if !store.accounts.iter().any(|a| a.uuid == norm) {
+        return new_jstring_or_null(&mut env, "未找到该微软账号记录。");
+    }
+    store.mode = msa::AccountMode::Microsoft { uuid: norm };
+    if let Err(e) = store.save(&dir) {
+        return new_jstring_or_null(&mut env, &format!("保存账号状态失败: {e}"));
+    }
+    let resolved = msa::resolve_and_activate(&dir, &msa::Endpoints::live(), false);
+    push_android_player_name(resolved.player_name);
+    new_jstring_or_null(&mut env, resolved.notice.as_deref().unwrap_or(""))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeRefreshMicrosoftAccount(
+    mut env: JNIEnv,
+    _class: JClass,
+    uuid: JString,
+) {
+    let uid: String = env.get_string(&uuid).map(Into::into).unwrap_or_default();
+    let norm = uid.replace('-', "").to_lowercase();
+    let dir = game_dir_path();
+    let _ = std::thread::Builder::new()
+        .name("horizon-msa-refresh".into())
+        .spawn(move || {
+            let mut store = msa::AccountStore::load(&dir);
+            if store.accounts.iter().any(|a| a.uuid == norm) {
+                store.mode = msa::AccountMode::Microsoft { uuid: norm };
+                let _ = store.save(&dir);
+            }
+            let resolved = msa::resolve_and_activate(&dir, &msa::Endpoints::live(), true);
+            push_android_player_name(resolved.player_name.clone());
+            let msg = match resolved.notice {
+                Some(note) => note,
+                None if resolved.session.is_some() => {
+                    format!("已刷新正版会话: {}", resolved.player_name)
+                }
+                None => format!("当前账号: {}", resolved.player_name),
+            };
+            notify_java_msa_update(&msg, "", "", false, true);
+            notify_java_toast(&msg);
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeRemoveMicrosoftAccount(
+    mut env: JNIEnv,
+    _class: JClass,
+    uuid: JString,
+) {
+    let uid: String = env.get_string(&uuid).map(Into::into).unwrap_or_default();
+    let norm = uid.replace('-', "").to_lowercase();
+    let dir = game_dir_path();
+    msa::delete_secrets(&norm);
+    let mut store = msa::AccountStore::load(&dir);
+    store.remove_account(&norm);
+    let _ = store.save(&dir);
+    let resolved = msa::resolve_and_activate(&dir, &msa::Endpoints::live(), false);
+    push_android_player_name(resolved.player_name);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeStartMsaSignIn(
+    mut env: JNIEnv,
+    _class: JClass,
+    client_id_override: JString,
+) {
+    let cid_override: String = env
+        .get_string(&client_id_override)
+        .map(Into::into)
+        .unwrap_or_default();
+    let dir = game_dir_path();
+    let mut store = msa::AccountStore::load(&dir);
+    if !cid_override.trim().is_empty() {
+        store.custom_client_id = cid_override.trim().to_owned();
+        let _ = store.save(&dir);
+    }
+    let Some(cid) = store.effective_client_id() else {
+        notify_java_msa_update(
+            "请先在下方「高级 / Client ID 配置」填入 Azure 应用 Client ID（开启 Allow public client flows）。",
+            "",
+            "",
+            false,
+            false,
+        );
+        return;
+    };
+
+    let generation = MSA_SIGNIN_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    notify_java_msa_update("正在向 Microsoft 请求设备登录码…", "", "", true, false);
+
+    let _ = std::thread::Builder::new()
+        .name("horizon-msa-signin".into())
+        .spawn(move || {
+            let ep = msa::Endpoints::live();
+            let dc = match msa::request_device_code(&ep, &cid) {
+                Ok(code) => code,
+                Err(e) => {
+                    if MSA_SIGNIN_GENERATION.load(Ordering::Acquire) == generation {
+                        notify_java_msa_update(&e, "", "", false, false);
+                    }
+                    return;
+                }
+            };
+            if MSA_SIGNIN_GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
+            jni_set_clipboard(&dc.user_code);
+            notify_java_msa_update(
+                "验证码已自动复制到剪贴板！请点击下方按钮打开浏览器粘贴授权：",
+                &dc.user_code,
+                &dc.verification_uri,
+                true,
+                false,
+            );
+
+            let ms_tokens = match msa::wait_for_device_tokens(&ep, &cid, &dc, &|| {
+                MSA_SIGNIN_GENERATION.load(Ordering::Acquire) != generation
+            }) {
+                Ok(tokens) => tokens,
+                Err(e) => {
+                    if MSA_SIGNIN_GENERATION.load(Ordering::Acquire) == generation {
+                        notify_java_msa_update(&e, "", "", false, false);
+                    }
+                    return;
+                }
+            };
+            if MSA_SIGNIN_GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
+
+            let finished = msa::finish_sign_in(&ep, ms_tokens, &|phase| {
+                if MSA_SIGNIN_GENERATION.load(Ordering::Acquire) == generation {
+                    notify_java_msa_update(phase, &dc.user_code, &dc.verification_uri, true, false);
+                }
+            });
+
+            if MSA_SIGNIN_GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
+
+            match finished {
+                Ok((account, secrets)) => {
+                    msa::save_secrets(&account.uuid, &secrets);
+                    let mut current_store = msa::AccountStore::load(&dir);
+                    current_store.upsert_account(account.clone());
+                    current_store.mode = msa::AccountMode::Microsoft {
+                        uuid: account.uuid.clone(),
+                    };
+                    let _ = current_store.save(&dir);
+                    let resolved = msa::resolve_and_activate(&dir, &ep, false);
+                    push_android_player_name(resolved.player_name.clone());
+                    let ok_msg = format!("正版登录成功！当前玩家: {}", resolved.player_name);
+                    notify_java_msa_update(&ok_msg, "", "", false, true);
+                    notify_java_toast(&ok_msg);
+                }
+                Err(e) => {
+                    notify_java_msa_update(&e, "", "", false, false);
+                }
+            }
+        });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeCancelMsaSignIn(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    MSA_SIGNIN_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeImportSessionJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    json_text: JString,
+) -> jni::sys::jstring {
+    let raw: String = env
+        .get_string(&json_text)
+        .map(Into::into)
+        .unwrap_or_default();
+    let dir = game_dir_path();
+    match msa::import_session_json(&dir, &raw) {
+        Ok(resolved) => {
+            push_android_player_name(resolved.player_name.clone());
+            notify_java_toast(&format!("已导入正版会话: {}", resolved.player_name));
+            new_jstring_or_null(&mut env, "")
+        }
+        Err(e) => new_jstring_or_null(&mut env, &format!("导入失败: {e}")),
+    }
+}
+
 fn register_ime_natives(app: &AndroidApp) {
     unsafe {
         let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
@@ -115,11 +389,87 @@ fn register_ime_natives(app: &AndroidApp) {
                     fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeOnWindowInsets
                         as *mut std::ffi::c_void,
                 },
+                jni::NativeMethod {
+                    name: "nativeGetAccountStateJson".into(),
+                    sig: "()Ljava/lang/String;".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeGetAccountStateJson
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeSetOfflineMode".into(),
+                    sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeSetOfflineMode
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeSetCustomClientId".into(),
+                    sig: "(Ljava/lang/String;)V".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeSetCustomClientId
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeSelectMicrosoftAccount".into(),
+                    sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeSelectMicrosoftAccount
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeRefreshMicrosoftAccount".into(),
+                    sig: "(Ljava/lang/String;)V".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeRefreshMicrosoftAccount
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeRemoveMicrosoftAccount".into(),
+                    sig: "(Ljava/lang/String;)V".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeRemoveMicrosoftAccount
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeStartMsaSignIn".into(),
+                    sig: "(Ljava/lang/String;)V".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeStartMsaSignIn
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeCancelMsaSignIn".into(),
+                    sig: "()V".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeCancelMsaSignIn
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeImportSessionJson".into(),
+                    sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeImportSessionJson
+                        as *mut std::ffi::c_void,
+                },
             ];
             if let Err(e) = env.register_native_methods(cls, &methods) {
                 eprintln!("Horizon Android register_native_methods failed: {e}");
             }
         }
+        std::mem::forget(activity);
+    }
+}
+
+fn call_java_void_method(method: &str) {
+    let Some(app) = ANDROID_APP_FOR_IME.get() else {
+        return;
+    };
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return;
+        }
+        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
+            return;
+        };
+        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
+            return;
+        };
+        let activity = JObject::from_raw(act_ptr);
+        let _ = env.call_method(&activity, method, "()V", &[]);
         std::mem::forget(activity);
     }
 }
@@ -180,6 +530,121 @@ fn call_java_string_method(method: &str, text: &str) {
     }
 }
 
+fn jni_open_secret(key: &str) -> Option<String> {
+    let app = ANDROID_APP_FOR_IME.get()?;
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return None;
+        }
+        let vm = jni::JavaVM::from_raw(vm_ptr).ok()?;
+        let mut env = vm
+            .get_env()
+            .or_else(|_| vm.attach_current_thread_permanently())
+            .ok()?;
+        let activity = JObject::from_raw(act_ptr);
+        let jkey = env.new_string(key).ok()?;
+        let res = env
+            .call_method(
+                &activity,
+                "openSecret",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&jkey)],
+            )
+            .ok()
+            .and_then(|v| v.l().ok())
+            .and_then(|obj| {
+                if obj.is_null() {
+                    None
+                } else {
+                    env.get_string(&JString::from(obj)).ok().map(String::from)
+                }
+            })
+            .filter(|s| !s.is_empty());
+        std::mem::forget(activity);
+        res
+    }
+}
+
+fn jni_seal_secret(key: &str, plaintext: &str) {
+    let Some(app) = ANDROID_APP_FOR_IME.get() else {
+        return;
+    };
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return;
+        }
+        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
+            return;
+        };
+        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
+            return;
+        };
+        let activity = JObject::from_raw(act_ptr);
+        if let (Ok(jk), Ok(jv)) = (env.new_string(key), env.new_string(plaintext)) {
+            let _ = env.call_method(
+                &activity,
+                "sealSecret",
+                "(Ljava/lang/String;Ljava/lang/String;)V",
+                &[JValue::Object(&jk), JValue::Object(&jv)],
+            );
+        }
+        std::mem::forget(activity);
+    }
+}
+
+fn jni_delete_secret(key: &str) {
+    call_java_string_method("deleteSecret", key);
+}
+
+fn notify_java_msa_update(
+    status: &str,
+    user_code: &str,
+    verification_uri: &str,
+    in_progress: bool,
+    completed: bool,
+) {
+    let Some(app) = ANDROID_APP_FOR_IME.get() else {
+        return;
+    };
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return;
+        }
+        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
+            return;
+        };
+        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
+            return;
+        };
+        let activity = JObject::from_raw(act_ptr);
+        if let (Ok(js), Ok(jc), Ok(ju)) = (
+            env.new_string(status),
+            env.new_string(user_code),
+            env.new_string(verification_uri),
+        ) {
+            let _ = env.call_method(
+                &activity,
+                "onMsaSignInUpdate",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZ)V",
+                &[
+                    JValue::Object(&js),
+                    JValue::Object(&jc),
+                    JValue::Object(&ju),
+                    JValue::Bool(u8::from(in_progress)),
+                    JValue::Bool(u8::from(completed)),
+                ],
+            );
+        }
+        std::mem::forget(activity);
+    }
+}
+
 fn jni_get_clipboard() -> Option<String> {
     let app = ANDROID_APP_FOR_IME.get()?;
     unsafe {
@@ -228,6 +693,10 @@ fn notify_java_toast(message: &str) {
     call_java_string_method("showToast", message);
 }
 
+fn notify_java_open_account_dialog() {
+    call_java_void_method("openAccountCenterDialog");
+}
+
 fn notify_java_boot_progress(stage: &str, percent: i32) {
     let Some(app) = ANDROID_APP_FOR_IME.get() else {
         return;
@@ -258,25 +727,7 @@ fn notify_java_boot_progress(stage: &str, percent: i32) {
 }
 
 fn notify_java_boot_ready() {
-    let Some(app) = ANDROID_APP_FOR_IME.get() else {
-        return;
-    };
-    unsafe {
-        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
-        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
-        if vm_ptr.is_null() || act_ptr.is_null() {
-            return;
-        }
-        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
-            return;
-        };
-        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
-            return;
-        };
-        let activity = JObject::from_raw(act_ptr);
-        let _ = env.call_method(&activity, "dismissBootSplash", "()V", &[]);
-        std::mem::forget(activity);
-    }
+    call_java_void_method("dismissBootSplash");
 }
 
 #[used]
@@ -367,6 +818,7 @@ fn run_android(app: AndroidApp) {
     let game_dir = base_dir.join("game");
     let _ = fs::create_dir_all(&game_dir);
     let _ = std::env::set_current_dir(&game_dir);
+    let _ = ANDROID_GAME_DIR.set(game_dir.clone());
 
     register_ime_natives(&app);
     let _ = ANDROID_APP_FOR_IME.set(app.clone());
@@ -374,7 +826,9 @@ fn run_android(app: AndroidApp) {
     set_android_keep_screen_on_callback(notify_java_keep_screen_on);
     set_android_toast_callback(notify_java_toast);
     set_android_boot_callbacks(notify_java_boot_progress, notify_java_boot_ready);
+    set_android_account_dialog_callback(notify_java_open_account_dialog);
     set_android_clipboard_callbacks(jni_get_clipboard, jni_set_clipboard);
+    msa::set_secret_store_callbacks(jni_open_secret, jni_seal_secret, jni_delete_secret);
 
     if let Err(err) = extract_bundled_resources(&app, &resources_dir) {
         let _ = fs::write(base_dir.join("extract_error.log"), &err);
@@ -382,7 +836,19 @@ fn run_android(app: AndroidApp) {
         notify_java_boot_progress(&format!("资源准备异常: {err}"), 45);
     }
 
-    notify_java_boot_progress("正在初始化核心运行环境…", 48);
+    // Resolve saved account mode: defaults to instant Offline Mode ("Player") with zero login gate!
+    // Only touches the network if the player explicitly left a Microsoft account selected and its
+    // token has < 1 hour remaining.
+    let saved_store = msa::AccountStore::load(&game_dir);
+    if matches!(saved_store.mode, msa::AccountMode::Microsoft { .. }) {
+        notify_java_boot_progress("正在恢复正版账号会话…", 47);
+    }
+    let identity = msa::resolve_and_activate(&game_dir, &msa::Endpoints::live(), false);
+    if let Some(note) = &identity.notice {
+        notify_java_toast(note);
+    }
+
+    notify_java_boot_progress("正在初始化核心运行环境…", 49);
     horizon_client::entry::set_android_app(app);
     let args = vec![
         "--resources".to_owned(),
@@ -391,7 +857,7 @@ fn run_android(app: AndroidApp) {
         game_dir.to_string_lossy().into_owned(),
         "--fullscreen".to_owned(),
         "--name".to_owned(),
-        "Player".to_owned(),
+        identity.player_name,
     ];
     let startup = horizon_client::entry::prepare_with_args(&args);
     horizon_mod_host::main_with(Vec::new(), &[], &[], startup);

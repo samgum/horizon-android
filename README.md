@@ -37,6 +37,9 @@
 - **Mobile Chat, Command & IME Bridge**:
   - Full Android `InputConnection` bridge supporting CJK Pinyin composition, `IME_ACTION_SEND`, Unicode backspace (`deleteSurroundingTextInCodePoints`), and system `ClipboardManager` copy/paste.
   - Switchable **Top-Docked** (never occluded by the soft keyboard, command suggestions expand downward) or **Follow-Keyboard** (`WindowInsets.Type.ime()`) chat bar, paired with one-tap `[Tab]`, `[↑]`, `[↓]`, `[Paste]`, and `[Send]` quick keys.
+- **Dual-Mode Account Center (Offline Direct-Test + Microsoft Genuine Sign-In)**:
+  - Launches straight into **Offline Mode (`Player`)** by default with **zero login gate** for instant local & offline-server testing (with customizable offline usernames).
+  - Tap the top-left Main Menu account badge anytime to sign in with a **Microsoft Account** via OAuth 2.0 Device Code (auto-copies code & opens system browser), completing the full Xbox Live → XSTS → Minecraft Services chain with **Android Hardware Keystore (`AES-256-GCM`)** token encryption, automatic renewal, online-mode server authentication, and live account hot-swapping.
 - **Display Cutout, Adaptive GUI Scale & Foolproof Launch**:
   - Automatic `DisplayCutout` and gesture-inset safe zones (`shortEdges` immersive sticky fullscreen), mobile-tuned `Auto` GUI scale (`≥ 480×320` logical viewport on `20:9` phones), universal `[X]` screen close button, double-back-to-exit protection, and Bluetooth/USB gamepad auto-hide.
   - Adaptive launcher icon + non-stretching Android 12+ `SplashScreen` + native landscape `BootSplashView` progress overlay that tracks first-launch resource extraction and pre-compiles world shaders before unveiling a stutter-free 60 FPS Main Menu.

@@ -567,6 +567,9 @@ impl ApplicationHandler for Game<'_> {
 #[cfg(target_os = "android")]
 impl Game<'_> {
     pub(crate) fn drain_android_ime_events(&mut self) {
+        if let Some(name) = crate::entry::take_android_player_name() {
+            self.options.player_name = Some(name);
+        }
         for ev in crate::entry::drain_android_ime() {
             match ev {
                 crate::entry::AndroidImeEvent::Commit(text) => self.ime_commit(&text),

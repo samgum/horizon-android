@@ -3,9 +3,12 @@
 //! online-mode servers need: authlib's MinecraftServicesSessionService.joinServer
 //! through the services discovery document. The access token stays in this
 //! process's memory: it is never logged, printed or written anywhere.
+#[path = "auth/msa.rs"]
+pub mod msa;
+
 use std::{
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime},
 };
 
@@ -15,6 +18,7 @@ pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/min
 const MAX_SESSION_FILE_AGE: Duration = Duration::from_secs(120);
 
 /// A signed-in account (vanilla's User with type msa).
+#[derive(Clone)]
 pub struct AuthSession {
     pub name: String,
     pub uuid: u128,
@@ -46,6 +50,16 @@ impl AuthSession {
             name: name.to_owned(),
             uuid,
             xuid: None,
+            access_token: access_token.to_owned(),
+        }
+    }
+
+    /// Construct a session including its Xbox user ID (`xuid`).
+    pub fn with_xuid(name: &str, uuid: u128, xuid: Option<String>, access_token: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            uuid,
+            xuid,
             access_token: access_token.to_owned(),
         }
     }
@@ -123,14 +137,20 @@ impl AuthSession {
     }
 }
 
-static CURRENT: OnceLock<Arc<AuthSession>> = OnceLock::new();
+static CURRENT: RwLock<Option<Arc<AuthSession>>> = RwLock::new(None);
 
-/// The account this game was started with (set once at start).
+/// The account this game plays as; may be updated at runtime when switching
+/// between Microsoft genuine accounts and offline mode on mobile.
 pub fn set_current(session: AuthSession) {
-    let _ = CURRENT.set(Arc::new(session));
+    set_current_opt(Some(session));
+}
+pub fn set_current_opt(session: Option<AuthSession>) {
+    if let Ok(mut guard) = CURRENT.write() {
+        *guard = session.map(Arc::new);
+    }
 }
 pub fn current() -> Option<Arc<AuthSession>> {
-    CURRENT.get().cloned()
+    CURRENT.read().ok().and_then(|s| s.clone())
 }
 
 /// Why joining a server through the session service failed, like the

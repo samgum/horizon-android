@@ -4937,6 +4937,8 @@ impl Game<'_> {
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
+            #[cfg(target_os = "android")]
+            self.draw_android_title_overlays(&mut batch);
             return batch;
         }
         if self.title.is_some() {
@@ -4963,6 +4965,8 @@ impl Game<'_> {
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
+            #[cfg(target_os = "android")]
+            self.draw_android_title_overlays(&mut batch);
             return batch;
         }
         let atlas_ptr: *const HudAtlas = &self.gui.atlas;
@@ -9115,7 +9119,7 @@ impl Game<'_> {
             return false;
         }
         if self.title.is_some() {
-            return self.screen == Screen::Options
+            return self.screen != Screen::Playing
                 || self
                     .title
                     .as_ref()
@@ -9136,6 +9140,93 @@ impl Game<'_> {
         let safe_r = (ins.cutout[2] as f32 / scale).ceil();
         let safe_t = (ins.cutout[1] as f32 / scale).ceil();
         [batch.width - 28.0 - safe_r, 6.0 + safe_t, 22.0, 22.0]
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_account_pill_shown(&self) -> bool {
+        self.title
+            .as_ref()
+            .is_some_and(|t| matches!(t.mode, horizon_client::title::Mode::Main))
+            && self.screen == Screen::Playing
+            && self.pending_entry.is_none()
+            && self.integrated_starting.is_none()
+            && self.pack_reload.is_none()
+            && self.pending_save.is_none()
+            && !self.dialog_open()
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_account_pill_info(&self, batch: &HudBatch) -> ([f32; 4], String, bool) {
+        let scale = batch.scale.max(1.0);
+        let ins = crate::entry::android_window_insets();
+        let safe_l = (ins.cutout[0] as f32 / scale).ceil();
+        let safe_t = (ins.cutout[1] as f32 / scale).ceil();
+        let (label, genuine) = if let Some(sess) = horizon_client::auth::current() {
+            (format!("正版: {} [账号]", sess.name), true)
+        } else {
+            (format!("离线: {} [账号]", self.options.player_name()), false)
+        };
+        let tw = HudBatch::text_width(&self.gui.atlas, &label);
+        let w = (tw + 16.0).clamp(76.0, batch.width * 0.48);
+        ([6.0 + safe_l, 6.0 + safe_t, w, 20.0], label, genuine)
+    }
+
+    #[cfg(target_os = "android")]
+    fn draw_android_title_overlays(&self, batch: &mut HudBatch) {
+        let a = &self.gui.atlas;
+        if self.android_close_button_shown() {
+            let [bx, by, bw, bh] = Self::android_close_button_rect(batch);
+            batch.fill(a, bx, by, bw, bh, horizon_client::hud::rgba(12, 12, 16, 175));
+            let border = horizon_client::hud::rgba(255, 255, 255, 205);
+            batch.fill(a, bx, by, bw, 1.0, border);
+            batch.fill(a, bx, by + bh - 1.0, bw, 1.0, border);
+            batch.fill(a, bx, by, 1.0, bh, border);
+            batch.fill(a, bx + bw - 1.0, by, 1.0, bh, border);
+            let tw = HudBatch::text_width(a, "X");
+            batch.text(
+                a,
+                "X",
+                bx + (bw - tw) / 2.0,
+                by + (bh - 8.0) / 2.0,
+                border,
+                true,
+            );
+        } else if self.android_account_pill_shown() {
+            let ([px, py, pw, ph], label, genuine) = self.android_account_pill_info(batch);
+            batch.fill(a, px, py, pw, ph, horizon_client::hud::rgba(14, 16, 22, 195));
+            let border = if genuine {
+                horizon_client::hud::rgba(74, 222, 128, 215)
+            } else {
+                horizon_client::hud::rgba(180, 190, 208, 190)
+            };
+            batch.fill(a, px, py, pw, 1.0, border);
+            batch.fill(a, px, py + ph - 1.0, pw, 1.0, border);
+            batch.fill(a, px, py, 1.0, ph, border);
+            batch.fill(a, px + pw - 1.0, py, 1.0, ph, border);
+            let dot_col = if genuine {
+                horizon_client::hud::rgba(74, 222, 128, 255)
+            } else {
+                horizon_client::hud::rgba(250, 204, 21, 235)
+            };
+            batch.fill(a, px + 4.0, py + (ph - 4.0) / 2.0, 4.0, 4.0, dot_col);
+            let tw = HudBatch::text_width(a, &label).max(1.0);
+            let max_tw = (pw - 14.0).max(1.0);
+            let scale = (max_tw / tw).min(1.0);
+            let tx = px + 11.0;
+            let ty = py + (ph - 8.0) / 2.0;
+            let start = batch.vertices.len();
+            batch.text(
+                a,
+                &label,
+                tx,
+                ty,
+                horizon_client::hud::rgba(245, 248, 252, 245),
+                true,
+            );
+            if scale < 1.0 {
+                batch.scale_since(start, tx, py + ph / 2.0, scale, scale);
+            }
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -9382,6 +9473,17 @@ impl Game<'_> {
                         && gy <= by + bh + 4.0
                     {
                         self.android_escape_current_screen(event_loop);
+                        return;
+                    }
+                }
+                if matches!(touch.phase, TouchPhase::Started) && self.android_account_pill_shown() {
+                    let ([px, py, pw, ph], _, _) = self.android_account_pill_info(&b);
+                    if gx >= px - 4.0
+                        && gx <= px + pw + 4.0
+                        && gy >= py - 4.0
+                        && gy <= py + ph + 4.0
+                    {
+                        crate::entry::notify_android_open_account_dialog();
                         return;
                     }
                 }
