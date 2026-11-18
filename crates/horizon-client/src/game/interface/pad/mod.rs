@@ -579,7 +579,10 @@ impl Game<'_> {
             self.touch.settings = self.settings.touch.clone();
             self.touch.auxiliary_only = horizon_client::android_runtime::active_input()
                 == horizon_client::android_gamepad::InputMode::Controller;
-            let swimming = self.player.as_ref().is_some_and(|p| p.swimming);
+            let swimming = self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.swimming || p.fluids.was_touching_water);
             let flying = self.player.as_ref().is_some_and(|p| p.flying);
             let may_fly = self
                 .player
@@ -615,6 +618,7 @@ impl Game<'_> {
                 && p.may_fly
                 && !p.spectator
                 && !p.swimming
+                && !p.fluids.was_touching_water
             {
                 p.was_jumping = false;
                 p.jump_trigger_time = 7;

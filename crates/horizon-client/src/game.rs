@@ -4301,7 +4301,18 @@ impl Game<'_> {
         if self.creative {
             if self.destroy_delay == 0 {
                 self.break_block(hit.pos)?;
-                self.destroy_delay = 5;
+                #[cfg(target_os = "android")]
+                {
+                    self.destroy_delay = if self.touch.holding && !self.touch.crosshair() {
+                        10
+                    } else {
+                        5
+                    };
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    self.destroy_delay = 5;
+                }
             }
             return Ok(());
         }
@@ -4348,7 +4359,18 @@ impl Game<'_> {
             let pos = m.pos;
             self.mining = None;
             self.break_block(pos)?;
-            self.destroy_delay = 5;
+            #[cfg(target_os = "android")]
+            {
+                self.destroy_delay = if self.touch.holding && !self.touch.crosshair() {
+                    10
+                } else {
+                    5
+                };
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                self.destroy_delay = 5;
+            }
         }
         Ok(())
     }
