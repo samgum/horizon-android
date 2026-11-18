@@ -868,4 +868,7 @@ fn run_android(app: AndroidApp) {
     ];
     let startup = horizon_client::entry::prepare_with_args(&args);
     horizon_mod_host::main_with(Vec::new(), &[], &[], startup);
+    // NativeActivity keeps the Linux process alive after android_main returns, leaving Rust
+    // OnceLock/static globals dirty on the next launch unless we exit the process cleanly.
+    std::process::exit(0);
 }
