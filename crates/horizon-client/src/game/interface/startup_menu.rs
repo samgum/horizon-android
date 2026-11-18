@@ -24,6 +24,10 @@ pub(super) struct StartupMenu {
     physical_keys: HashSet<KeyCode>,
     #[cfg(target_os = "android")]
     last_back_press: Option<Instant>,
+    #[cfg(target_os = "android")]
+    touch_drag: Option<(u64, f64, f64, f64, bool)>,
+    #[cfg(target_os = "android")]
+    ime_active: bool,
     dragging: bool,
     clipboard: SystemClipboard,
     selection: AppendSelection,
@@ -1101,9 +1105,24 @@ impl Loading {
         event: WindowEvent,
     ) -> Result<()> {
         if let WindowEvent::Touch(touch) = event {
+            #[cfg(target_os = "android")]
+            if self.menu.pending.is_none() {
+                // Foolproof guard during App::Loading: wait until App::Ready takes over.
+                return Ok(());
+            }
             let device_id = touch.device_id;
             match touch.phase {
                 winit::event::TouchPhase::Started => {
+                    #[cfg(target_os = "android")]
+                    {
+                        self.menu.touch_drag = Some((
+                            touch.id,
+                            touch.location.x,
+                            touch.location.y,
+                            touch.location.y,
+                            false,
+                        ));
+                    }
                     self.menu_event(
                         event_loop,
                         WindowEvent::CursorMoved {
@@ -1111,25 +1130,19 @@ impl Loading {
                             position: touch.location,
                         },
                     )?;
-                    return self.menu_event(
+                    self.menu_event(
                         event_loop,
                         WindowEvent::MouseInput {
                             device_id,
                             state: ElementState::Pressed,
                             button: MouseButton::Left,
                         },
-                    );
+                    )?;
+                    #[cfg(target_os = "android")]
+                    self.sync_startup_android_ime();
+                    return Ok(());
                 }
                 winit::event::TouchPhase::Moved => {
-                    return self.menu_event(
-                        event_loop,
-                        WindowEvent::CursorMoved {
-                            device_id,
-                            position: touch.location,
-                        },
-                    );
-                }
-                winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => {
                     self.menu_event(
                         event_loop,
                         WindowEvent::CursorMoved {
@@ -1137,14 +1150,50 @@ impl Loading {
                             position: touch.location,
                         },
                     )?;
-                    return self.menu_event(
+                    #[cfg(target_os = "android")]
+                    if let Some((id, sx, sy, ref mut last_y, ref mut scrolled)) =
+                        self.menu.touch_drag
+                        && id == touch.id
+                    {
+                        let dx = (touch.location.x - sx).abs();
+                        let dy_total = (touch.location.y - sy).abs();
+                        let dy = touch.location.y - *last_y;
+                        *last_y = touch.location.y;
+                        if (*scrolled || (dy_total > 14.0 && dy_total > dx)) && dy.abs() > 0.5 {
+                            *scrolled = true;
+                            self.menu_event(
+                                event_loop,
+                                WindowEvent::MouseWheel {
+                                    device_id,
+                                    delta: MouseScrollDelta::LineDelta(0.0, (dy / 36.0) as f32),
+                                    phase: winit::event::TouchPhase::Moved,
+                                },
+                            )?;
+                        }
+                    }
+                    return Ok(());
+                }
+                winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled => {
+                    #[cfg(target_os = "android")]
+                    let _ = self.menu.touch_drag.take().filter(|(id, ..)| *id == touch.id);
+                    self.menu_event(
+                        event_loop,
+                        WindowEvent::CursorMoved {
+                            device_id,
+                            position: touch.location,
+                        },
+                    )?;
+                    self.menu_event(
                         event_loop,
                         WindowEvent::MouseInput {
                             device_id,
                             state: ElementState::Released,
                             button: MouseButton::Left,
                         },
-                    );
+                    )?;
+                    #[cfg(target_os = "android")]
+                    self.sync_startup_android_ime();
+                    return Ok(());
                 }
             }
         }
@@ -1196,6 +1245,7 @@ impl Loading {
                         event_loop.exit();
                     } else {
                         self.menu.last_back_press = Some(now);
+                        crate::entry::notify_android_toast("再按一次返回键退出 / Press back again to exit");
                     }
                     return Ok(());
                 }
@@ -1472,7 +1522,7 @@ impl Loading {
                 title.focused_button = None;
             }
         }
-        if self.menu.pending.is_some() {
+        if cfg!(target_os = "android") || self.menu.pending.is_some() {
             horizon_client::level_loading::draw_loading_overlay(
                 batch,
                 &gui.atlas,
@@ -1585,6 +1635,86 @@ impl Loading {
         self.handle = Some(handle);
         self.menu.reload_packs = false;
         Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) fn startup_text_focused(&mut self) -> bool {
+        if self.gui.is_none() || self.menu.pending.is_some() || self.menu.win.is_some() {
+            return false;
+        }
+        if self.menu.options_open {
+            return self.menu.options.typing();
+        }
+        self.menu
+            .title
+            .as_mut()
+            .is_some_and(|t| t.has_caret_field() || t.focused_field().is_some())
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) fn sync_startup_android_ime(&mut self) {
+        let want = self.startup_text_focused();
+        if want != self.menu.ime_active {
+            self.menu.ime_active = want;
+            crate::entry::notify_android_ime_active(want);
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) fn drain_startup_android_ime(&mut self, event_loop: &dyn EventLoopCtl) {
+        self.sync_startup_android_ime();
+        for ev in crate::entry::drain_android_ime() {
+            match ev {
+                crate::entry::AndroidImeEvent::Commit(text) => {
+                    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+                    if clean.is_empty() || !self.startup_text_focused() {
+                        continue;
+                    }
+                    if self.menu.options_open {
+                        if let Some(gui) = &self.gui {
+                            self.menu.options.type_text(&gui.atlas, &clean);
+                        }
+                    } else if let Some(title) = &mut self.menu.title {
+                        title.type_text(&clean);
+                    }
+                }
+                crate::entry::AndroidImeEvent::Preedit(_) => {}
+                crate::entry::AndroidImeEvent::Backspace => {
+                    if !self.startup_text_focused() {
+                        continue;
+                    }
+                    if self.menu.options_open {
+                        if let Some(gui) = &self.gui {
+                            let events = self.menu.options.key(
+                                &mut self.settings,
+                                &gui.atlas,
+                                KeyCode::Backspace,
+                                None,
+                            );
+                            self.menu_option_events(events);
+                        }
+                    } else if let Some(title) = &mut self.menu.title {
+                        if title.has_caret_field() {
+                            title.field_key(KeyCode::Backspace, false, false);
+                        } else {
+                            title.backspace();
+                        }
+                    }
+                }
+                crate::entry::AndroidImeEvent::Enter => {
+                    if !self.menu.options_open && self.menu.title.is_some() {
+                        let batch =
+                            HudBatch::new(self.menu_size(), self.settings.gui_scale_inputs());
+                        if let Some(title) = &mut self.menu.title {
+                            let action = title.confirm_key_size((batch.width, batch.height)).0;
+                            self.menu_action(event_loop, action);
+                        }
+                    }
+                    crate::entry::notify_android_ime_active(false);
+                    self.menu.ime_active = false;
+                }
+            }
+        }
     }
 }
 

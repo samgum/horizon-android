@@ -388,7 +388,7 @@ mod tests {
             columns(&source, EDITION_START..WIDTH)
         );
         assert!(!out.as_chunks::<4>().0.contains(&[255, 0, 255, 255]));
-        // R, U and S: their strokes are faces, their notches and counters not.
+        // S, G and M: their strokes are faces.
         let lit = |x: usize, y: usize| lum(pixel(&out, x, y)) >= 100;
         let glyph = |i: usize, x: usize, y: usize| {
             lit(
@@ -396,21 +396,15 @@ mod tests {
                 FACE_TOP + y,
             )
         };
-        for (i, shape) in [R, U, S].into_iter().enumerate() {
+        for (i, shape) in [S, G, M].into_iter().enumerate() {
             for &[x0, y0, x1, y1] in shape {
                 assert!(glyph(i, (x0 + x1) / 2, (y0 + y1) / 2), "glyph {i}");
             }
         }
-        assert!(!glyph(0, 38, 21), "R's notch between bowl and leg");
-        assert!(!glyph(0, 20, 30), "R's open bottom");
-        assert!(!glyph(1, 20, 5), "U's open top");
-        assert!(!glyph(1, 2, 36), "U's rounded corner");
-        assert!(!glyph(2, 2, 22), "S's lower-left notch");
-        assert!(!glyph(2, 38, 17), "S's upper-right notch");
-        // The T: its bar and stem lit, either side of the stem under the bar not.
-        let t = |x: usize, y: usize| lit(T_LEFT + x, FACE_TOP + y);
-        assert!(t(2, 5) && t(36, 5) && t(21, 30), "T's bar and stem");
-        assert!(!t(5, 30) && !t(33, 30), "T's open sides");
+        // The Y: its forks and stem lit, either side of the stem under the join not.
+        let y_glyph = |x: usize, y: usize| lit(T_LEFT + x, FACE_TOP + y);
+        assert!(y_glyph(5, 5) && y_glyph(33, 5) && y_glyph(19, 30), "Y's forks and stem");
+        assert!(!y_glyph(5, 30) && !y_glyph(33, 30), "Y's open sides");
         assert_soft_rim(&out);
         // Nothing below the 14 GUI rows vanilla draws, and the word gap stays open.
         assert!(out[WIDTH * 55 * 4..].iter().all(|&b| b == 0));

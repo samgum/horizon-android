@@ -76,7 +76,11 @@ impl Missing {
             return;
         };
         match renderer.render(&loading_frame(&batch)) {
-            Ok(true) => return,
+            Ok(true) => {
+                #[cfg(target_os = "android")]
+                crate::entry::notify_android_boot_ready();
+                return;
+            }
             Ok(false) => {}
             Err(e) => log::warn!("Horizon: frame failed: {e}"),
         }

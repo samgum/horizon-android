@@ -349,11 +349,17 @@ impl Opt {
             Opt::PadRadialMode => "horizon.options.radial_mode",
             Opt::PadRadialStick => "horizon.options.radial_stick",
             Opt::TouchScheme => "Touch: Control Mode",
+            Opt::TouchContainerStyle => "Touch: Inventory Style",
+            Opt::TouchChatPosition => "Touch: Chat Bar",
+            Opt::TouchDynamicJoystick => "Touch: Dynamic Joystick",
+            Opt::TouchSprintMode => "Touch: Sprint Mode",
+            Opt::TouchOffhandButton => "Touch: Offhand Button",
+            Opt::TouchTopShortcuts => "Touch: F3 / F5 Buttons",
             Opt::TouchLeftHanded => "Touch: Left-Handed",
             Opt::TouchJoyX => "Touch: Joystick X",
             Opt::TouchJoyY => "Touch: Joystick Y",
             Opt::TouchJoySize => "Touch: Joystick Size",
-            Opt::TouchBtnSize => "Touch: Button Size",
+            Opt::TouchBtnSize => "Touch: Button Scale",
             Opt::TouchOpacity => "Touch: Opacity",
             Opt::TouchSensitivity => "Touch: Sensitivity",
             Opt::ModelPart(i) => [
@@ -452,10 +458,7 @@ impl Opt {
                 let sz = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Move as usize].size;
                 unit(sz, 0.08, 0.35)
             }
-            Opt::TouchBtnSize => {
-                let sz = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Jump as usize].size;
-                unit(sz, 0.06, 0.25)
-            }
+            Opt::TouchBtnSize => unit(s.touch.button_scale, 0.5, 2.0),
             Opt::TouchOpacity => {
                 let op = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Move as usize].opacity;
                 unit(op, 0.15, 1.0)
@@ -963,9 +966,30 @@ impl Opt {
                 let label = crate::touch::Mode::SCHEMES
                     .iter()
                     .find(|(m, sp, _)| *m == s.touch.mode && *sp == s.touch.split_controls)
-                    .map_or("Joystick & aim crosshair", |(_, _, l)| *l);
+                    .map_or("Joystick & tap to interact", |(_, _, l)| *l);
                 Text::literal(label)
             }
+            Opt::TouchContainerStyle => Text::literal(match s.touch.container_style {
+                crate::touch::ContainerTouchStyle::Bedrock => "Bedrock",
+                crate::touch::ContainerTouchStyle::Classic => "Classic",
+            }),
+            Opt::TouchChatPosition => Text::literal(match s.touch.chat_position {
+                crate::touch::ChatBarPosition::Top => "Top (Safe)",
+                crate::touch::ChatBarPosition::FollowKeyboard => "Above Keyboard",
+            }),
+            Opt::TouchDynamicJoystick => on_off(s.touch.dynamic_joystick),
+            Opt::TouchSprintMode => Text::literal(if s.touch.sprint_with_joystick {
+                "Joystick Push"
+            } else if s.touch.sprint_toggle {
+                "Button (Toggle)"
+            } else {
+                "Button (Hold)"
+            }),
+            Opt::TouchOffhandButton => on_off(s.touch.offhand_button),
+            Opt::TouchTopShortcuts => on_off(
+                s.touch.button_visibility[crate::touch::Control::Debug as usize]
+                    == crate::touch::layout::SHOWN,
+            ),
             Opt::TouchLeftHanded => on_off(s.touch.left_handed),
             Opt::TouchJoyX => {
                 let x = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Move as usize].center[0];
@@ -977,12 +1001,9 @@ impl Opt {
             }
             Opt::TouchJoySize => {
                 let sz = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Move as usize].size;
-                Text::literal(format!("{:.0}%", (sz / 0.18) * 100.0))
+                Text::literal(format!("{:.0}%", (sz / 0.27) * 100.0))
             }
-            Opt::TouchBtnSize => {
-                let sz = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Jump as usize].size;
-                Text::literal(format!("{:.0}%", (sz / 0.12) * 100.0))
-            }
+            Opt::TouchBtnSize => Text::literal(format!("{:.0}%", s.touch.button_scale * 100.0)),
             Opt::TouchOpacity => {
                 let op = s.touch.layouts[s.touch.mode.index()][crate::touch::Control::Move as usize].opacity;
                 Text::literal(format!("{:.0}%", op * 100.0))
@@ -1094,14 +1115,7 @@ impl Opt {
                 }
             }
             Opt::TouchBtnSize => {
-                let val = (0.06 + v * 0.19).clamp(0.06, 0.25);
-                for layout in &mut s.touch.layouts {
-                    for (i, p) in layout.iter_mut().enumerate() {
-                        if i != crate::touch::Control::Move as usize {
-                            p.size = val;
-                        }
-                    }
-                }
+                s.touch.button_scale = (0.5 + v * 1.5).clamp(0.5, 2.0);
             }
             Opt::TouchOpacity => {
                 let val = (0.15 + v * 0.85).clamp(0.15, 1.0);
@@ -1369,6 +1383,65 @@ impl Opt {
                 let nxt = next(cur, schemes.len() as u8) as usize;
                 s.touch.mode = schemes[nxt].0;
                 s.touch.split_controls = schemes[nxt].1;
+            }
+            Opt::TouchContainerStyle => {
+                s.touch.container_style = match s.touch.container_style {
+                    crate::touch::ContainerTouchStyle::Bedrock => {
+                        crate::touch::ContainerTouchStyle::Classic
+                    }
+                    crate::touch::ContainerTouchStyle::Classic => {
+                        crate::touch::ContainerTouchStyle::Bedrock
+                    }
+                };
+            }
+            Opt::TouchChatPosition => {
+                s.touch.chat_position = match s.touch.chat_position {
+                    crate::touch::ChatBarPosition::Top => {
+                        crate::touch::ChatBarPosition::FollowKeyboard
+                    }
+                    crate::touch::ChatBarPosition::FollowKeyboard => {
+                        crate::touch::ChatBarPosition::Top
+                    }
+                };
+            }
+            Opt::TouchDynamicJoystick => s.touch.dynamic_joystick = !s.touch.dynamic_joystick,
+            Opt::TouchSprintMode => {
+                let cur: u8 = if s.touch.sprint_with_joystick {
+                    0
+                } else if s.touch.sprint_toggle {
+                    1
+                } else {
+                    2
+                };
+                match next(cur, 3) {
+                    0 => {
+                        s.touch.sprint_with_joystick = true;
+                        s.touch.sprint_button = false;
+                        s.touch.sprint_toggle = false;
+                    }
+                    1 => {
+                        s.touch.sprint_with_joystick = false;
+                        s.touch.sprint_button = true;
+                        s.touch.sprint_toggle = true;
+                    }
+                    _ => {
+                        s.touch.sprint_with_joystick = false;
+                        s.touch.sprint_button = true;
+                        s.touch.sprint_toggle = false;
+                    }
+                }
+            }
+            Opt::TouchOffhandButton => s.touch.offhand_button = !s.touch.offhand_button,
+            Opt::TouchTopShortcuts => {
+                let target = if s.touch.button_visibility[crate::touch::Control::Debug as usize]
+                    == crate::touch::layout::SHOWN
+                {
+                    crate::touch::layout::HIDDEN
+                } else {
+                    crate::touch::layout::SHOWN
+                };
+                s.touch.button_visibility[crate::touch::Control::Debug as usize] = target;
+                s.touch.button_visibility[crate::touch::Control::Perspective as usize] = target;
             }
             Opt::TouchLeftHanded => s.touch.left_handed = !s.touch.left_handed,
             _ => {}
@@ -3086,6 +3159,12 @@ impl OptionsUi {
                 rows.push(Row::Heading("Touch Controls".to_owned()));
                 rows.extend(pairs(&[
                     Opt::TouchScheme,
+                    Opt::TouchContainerStyle,
+                    Opt::TouchChatPosition,
+                    Opt::TouchDynamicJoystick,
+                    Opt::TouchSprintMode,
+                    Opt::TouchOffhandButton,
+                    Opt::TouchTopShortcuts,
                     Opt::TouchLeftHanded,
                     Opt::TouchJoyX,
                     Opt::TouchJoyY,

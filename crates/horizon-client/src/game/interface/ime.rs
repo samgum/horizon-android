@@ -202,6 +202,10 @@ impl Game<'_> {
         if !self.text_field_focused() {
             return;
         }
+        if self.dialog_open() {
+            let _ = self.dialog_key(winit::keyboard::KeyCode::Backspace, None, None);
+            return;
+        }
         if self.title_input_active() {
             self.title_edit(None, true);
         } else if self.book.is_some() {
@@ -212,6 +216,14 @@ impl Game<'_> {
             match self.screen {
                 Screen::Chat => {
                     self.chat_key_code(winit::keyboard::KeyCode::Backspace, None);
+                }
+                Screen::CommandBlock => {
+                    self.command_block_key_code(winit::keyboard::KeyCode::Backspace, None, None);
+                }
+                Screen::Social => self.social_backspace(),
+                Screen::DebugOptions => self.debug_options_backspace(),
+                Screen::BlockEditor => {
+                    self.block_editor_key_code(winit::keyboard::KeyCode::Backspace, None, None);
                 }
                 Screen::Options => {
                     let _ = self.ui.options.key(
@@ -234,6 +246,33 @@ impl Game<'_> {
                 }
                 Screen::Inventory => self.station_text(None, true),
                 _ => {}
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) fn ime_enter(&mut self) {
+        use winit::keyboard::KeyCode;
+        if self.dialog_open() {
+            let _ = self.dialog_key(KeyCode::Enter, None, None);
+            return;
+        }
+        if self.book.is_some() {
+            self.book_input(Some(KeyCode::Enter), None);
+            return;
+        }
+        if self.sign_edit.is_some() {
+            self.sign_input(Some(KeyCode::Enter), None);
+            return;
+        }
+        match self.screen {
+            Screen::Chat => self.chat_key_code(KeyCode::Enter, None),
+            Screen::CommandBlock => self.command_block_key_code(KeyCode::Enter, None, None),
+            Screen::BlockEditor => self.block_editor_key_code(KeyCode::Enter, None, None),
+            _ => {
+                // Single-line fields (World Name, Seed, Server IP, Anvil, Search):
+                // pressing "Done/Send" on the soft keyboard dismisses the keyboard.
+                crate::entry::notify_android_ime_active(false);
             }
         }
     }

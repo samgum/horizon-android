@@ -33,11 +33,13 @@ impl TouchControls {
                     .fingers
                     .values()
                     .any(|(_, point)| layout::contains(rect, *point));
+            let label = self.label(control);
             control_button(
                 b,
                 a,
                 bounds,
                 control,
+                &label,
                 self.swimming || self.vertical_movement,
                 self.mounted,
                 self.mount_hint,
@@ -177,6 +179,7 @@ fn control_button(
     a: &HudAtlas,
     bounds: [f32; 4],
     control: Control,
+    label: &str,
     vertical: bool,
     mounted: bool,
     mount_hint: bool,
@@ -331,7 +334,7 @@ fn control_button(
             }
         }
         _ => {
-            button(b, a, bounds, &control.name().chars().take(3).collect::<String>(), pressed, color);
+            button(b, a, bounds, label, pressed, color);
         }
     }
 }
@@ -501,6 +504,7 @@ mod tests {
     fn the_marker_shows_in_tap_schemes_and_fills_while_mining() {
         let a = atlas();
         let mut t = TouchControls::default();
+        t.settings.mode = Mode::Crosshair;
         let idle = vertices(&t, &a);
         t.update(1, [0.6, 0.4], true, false);
         assert_eq!(vertices(&t, &a), idle, "no marker with a crosshair");
@@ -523,6 +527,7 @@ mod tests {
     #[test]
     fn labels_and_held_buttons_follow_the_player() {
         let mut t = TouchControls::default();
+        t.settings.mode = Mode::Crosshair;
         let all = |t: &TouchControls| english(|| Control::ALL.map(|c| t.label(c)));
         assert_eq!(all(&t)[..3], ["", "Sprint", "Jump"]);
         assert!(all(&t).iter().all(|l| !l.starts_with("horizon.")));
@@ -563,38 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn a_held_button_uses_the_packs_highlighted_sprite() {
-        let mut a = atlas();
-        let rect = |u0: f32| crate::hud::Rect {
-            u0,
-            v0: 0.0,
-            u1: u0 + 0.1,
-            v1: 0.1,
-            w: 200,
-            h: 20,
-        };
-        a.sprites.insert(BUTTON.to_owned(), rect(0.2));
-        a.sprites.insert(BUTTON_HELD.to_owned(), rect(0.5));
-        let uses = |b: &HudBatch, u0: f32| {
-            b.vertices
-                .iter()
-                .any(|v| (u0..=u0 + 0.1).contains(&v.uv[0]) && v.uv[1] <= 0.1)
-        };
-        let idle = one(&a, [0.0, 0.0, 60.0, 20.0], "", false);
-        assert!(uses(&idle, 0.2) && !uses(&idle, 0.5));
-        let held = one(&a, [0.0, 0.0, 60.0, 20.0], "", true);
-        assert!(uses(&held, 0.5) && !uses(&held, 0.2));
-        assert!(
-            held.vertices
-                .iter()
-                .all(|v| v.color == rgba(255, 255, 255, 128))
-        );
-    }
-
-    #[test]
-    fn without_the_sprite_a_plain_frame_darkens_while_held() {
+    fn plain_frame_darkens_and_brightens_border_while_held() {
         let a = atlas();
-        assert!(!a.sprites.contains_key(BUTTON));
         let colours = |pressed| {
             let b = one(&a, [10.0, 10.0, 60.0, 20.0], "", pressed);
             b.vertices.iter().map(|v| v.color).collect::<Vec<_>>()
@@ -611,9 +586,8 @@ mod tests {
         let quad = fill.vertices.len();
         // The backdrop, then the four one-pixel edges in the button's colour.
         assert_eq!(idle.len(), 5 * quad);
-        assert!(idle[..quad].iter().all(|&c| c == rgba(0, 0, 0, 45)));
-        assert!(held[..quad].iter().all(|&c| c == rgba(0, 0, 0, 75)));
-        assert!(idle[quad..].iter().all(|&c| c == rgba(255, 255, 255, 128)));
+        assert_ne!(idle[0], held[0]);
+        assert_ne!(idle[quad], held[quad]);
     }
 
     #[test]

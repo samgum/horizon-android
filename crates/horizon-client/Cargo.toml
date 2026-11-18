@@ -61,9 +61,6 @@ horizon-narrator = { path = "../horizon-narrator" }
 horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index", "runtime-process"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
-
-[target.'cfg(target_os = "android")'.dependencies]
-android-activity = "0.6.1"
 pollster = "0.4"
 bytemuck = { version = "1.24", features = ["derive"] }
 glam = "0.30"
@@ -105,6 +102,9 @@ fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 # Mod file roots are descriptor-bound: no symlink race can leave a mod's area.
 cap-std = "3"
 cap-fs-ext = "3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = "0.6.1"
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`HORIZON_SPIKES`, spans.rs).

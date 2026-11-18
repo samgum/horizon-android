@@ -3,10 +3,19 @@
 //! `isCopy`, `isPaste` and `isCut`, `StringUtil.filterText` and
 //! `ChatFormatting.stripFormatting`.
 
+use std::cell::RefCell;
 #[cfg(not(target_os = "android"))]
 use std::cell::RefMut;
-use std::cell::RefCell;
+use std::sync::OnceLock;
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
+
+type AndroidClipboardCallbacks = (fn() -> Option<String>, fn(&str));
+static ANDROID_CLIPBOARD: OnceLock<AndroidClipboardCallbacks> = OnceLock::new();
+
+/// Registers the Android JNI clipboard bridge (`ClipboardManager`).
+pub fn set_android_clipboard_callbacks(get: fn() -> Option<String>, set: fn(&str)) {
+    let _ = ANDROID_CLIPBOARD.set((get, set));
+}
 
 /// A text-editing shortcut (`InputWithModifiers.isSelectAll`, `isCopy`,
 /// `isPaste`, `isCut`).
@@ -170,6 +179,11 @@ impl SystemClipboard {
         }
         #[cfg(target_os = "android")]
         {
+            if let Some((get, _)) = ANDROID_CLIPBOARD.get()
+                && let Some(text) = get()
+            {
+                return text;
+            }
             self.copied().unwrap_or_default()
         }
     }
@@ -179,6 +193,10 @@ impl SystemClipboard {
             return;
         }
         *self.copied.borrow_mut() = Some(text.to_owned());
+        #[cfg(target_os = "android")]
+        if let Some((_, set)) = ANDROID_CLIPBOARD.get() {
+            set(text);
+        }
         #[cfg(not(target_os = "android"))]
         {
             let mut system = self.system();

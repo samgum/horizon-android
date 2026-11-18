@@ -380,10 +380,14 @@ impl Game<'_> {
 pub(super) struct TouchInteraction {
     pub(super) mount: bool,
     pub(super) friendly_interact: bool,
+    pub(super) mob_feed_or_tool: bool,
     pub(super) entity_hit: bool,
+    pub(super) block_hit: bool,
     pub(super) block_interact: bool,
     pub(super) extinguish_fire: bool,
+    pub(super) tap_uses_item: bool,
     pub(super) hold_uses_item: bool,
+    pub(super) context_action: bool,
 }
 
 impl Game<'_> {
@@ -398,17 +402,38 @@ impl Game<'_> {
             .get(self.selected)
             .and_then(|s| s.as_ref())
             .map(|s| &*s.item);
-        let item_uses = main_id.is_some_and(|id| {
-            horizon_client::touch::aim::item_uses_on_tap(id)
-                || self
-                    .items()
-                    .get(id)
-                    .is_some_and(|info| {
-                        info.food.is_some()
-                            || info.consumable.is_some()
-                            || info.blocks_attacks.is_some()
-                            || info.equip_slot.is_some()
-                    })
+        let tap_uses_item = main_id.is_some_and(horizon_client::touch::aim::item_uses_on_tap);
+        let hungry = self.creative
+            || self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.health.food.food < 20);
+        let always_consumable = main_id.is_some_and(|id| {
+            matches!(
+                id,
+                "minecraft:golden_apple"
+                    | "minecraft:enchanted_golden_apple"
+                    | "minecraft:chorus_fruit"
+                    | "minecraft:milk_bucket"
+                    | "minecraft:honey_bottle"
+                    | "minecraft:potion"
+                    | "minecraft:ominous_bottle"
+                    | "minecraft:suspicious_stew"
+                    | "minecraft:spyglass"
+                    | "minecraft:goat_horn"
+                    | "minecraft:brush"
+            ) || horizon_client::touch::aim::projectile_crosshair(id)
+        });
+        let can_hold_consume = main_id.is_some_and(|id| {
+            always_consumable
+                || self.items().get(id).is_some_and(|info| {
+                    info.consumable.is_some() || (info.food.is_some() && hungry)
+                })
+        });
+        let equip_or_block = main_id.is_some_and(|id| {
+            self.items()
+                .get(id)
+                .is_some_and(|info| info.equip_slot.is_some() || info.blocks_attacks.is_some())
         });
         let mob_near = self.mob_hit_within(4.0);
         let mount = self.boat_hit().is_some()
@@ -523,17 +548,26 @@ impl Game<'_> {
             }
             _ => (false, false),
         };
+        let block_hit = matches!(target, Some(mod_api::CrosshairTarget::Block { .. }));
         if point.is_some() {
             self.touch.aim = prev_aim;
         }
-        let hold_uses_item = !extinguish_fire && (item_uses || friendly_interact);
+        // Holding on a world block mines unless holding an active consumable/projectile!
+        // Buckets, bone meal, boats, armor, and full-hunger food never block mining.
+        let hold_uses_item = !extinguish_fire && can_hold_consume;
+        let context_action =
+            mount || friendly_interact || block_interact || can_hold_consume || equip_or_block;
         TouchInteraction {
             mount,
             friendly_interact,
+            mob_feed_or_tool,
             entity_hit,
+            block_hit,
             block_interact,
             extinguish_fire,
+            tap_uses_item,
             hold_uses_item,
+            context_action,
         }
     }
 
@@ -541,11 +575,19 @@ impl Game<'_> {
     pub(super) fn poll_pads(&mut self, event_loop: &dyn EventLoopCtl) {
         #[cfg(target_os = "android")]
         {
+            self.poll_android_touch_timers();
             self.touch.settings = self.settings.touch.clone();
+            self.touch.auxiliary_only = horizon_client::android_runtime::active_input()
+                == horizon_client::android_gamepad::InputMode::Controller;
             let swimming = self.player.as_ref().is_some_and(|p| p.swimming);
             let flying = self.player.as_ref().is_some_and(|p| p.flying);
+            let may_fly = self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.may_fly && !p.spectator);
             self.touch.swimming = swimming;
             self.touch.vertical_movement = flying || swimming;
+            self.touch.can_fly = may_fly;
             self.touch.mounted = self.riding.is_some();
             self.touch.sneaking = self.keys.held(Action::Sneak);
             self.touch.break_progress = self.mining.as_ref().map_or(0.0, |m| m.progress);
@@ -555,39 +597,63 @@ impl Game<'_> {
                 .and_then(|s| s.as_ref())
                 .map(|s| &*s.item);
             let off_id = self.offhand.as_ref().map(|s| &*s.item);
+            self.touch.projectile_crosshair =
+                main_id.is_some_and(horizon_client::touch::aim::projectile_crosshair);
             self.touch.shield_available =
                 main_id == Some("minecraft:shield") || off_id == Some("minecraft:shield");
             let pre_info = self.touch_interaction_at(None);
             self.touch.mount_hint = pre_info.mount;
             self.touch.hold_uses_item = pre_info.hold_uses_item;
             let mut state = self.touch.poll_state();
+            if std::mem::take(&mut self.touch.fly_toggle_requested)
+                && let Some(p) = self.player.as_mut()
+                && p.may_fly
+                && !p.spectator
+                && !p.swimming
+            {
+                p.was_jumping = false;
+                p.jump_trigger_time = 7;
+                state.set(Button::South, true);
+            }
+            for (action, down) in self.touch.key_events() {
+                if let Err(e) = self.pad_action(&action, down) {
+                    log::warn!("Horizon: touch key action {action}: {e}");
+                }
+            }
             let tap_info = if self.touch.aim.is_some() && !self.touch.crosshair() {
                 self.touch_interaction_at(None)
             } else {
                 pre_info
             };
-            if let Some(held_use) = self.touch.take_tap() {
+            if let Some(_held_use) = self.touch.take_tap() {
                 if tap_info.extinguish_fire {
                     state.triggers[1] = 1.0;
-                } else if tap_info.entity_hit && !held_use && !tap_info.friendly_interact {
-                    state.triggers[1] = 1.0;
-                } else {
+                } else if tap_info.entity_hit {
+                    // Tapping an entity attacks/breaks it unless holding its feed/shear/saddle tool!
+                    // Mounting boats/horses and trading with villagers use the contextual Use button.
+                    if tap_info.mob_feed_or_tool {
+                        state.triggers[0] = 1.0;
+                    } else {
+                        state.triggers[1] = 1.0;
+                    }
+                } else if tap_info.block_hit || tap_info.tap_uses_item {
+                    // Tapping a block places the held block / opens chest / uses bucket.
                     state.triggers[0] = 1.0;
+                } else {
+                    state.triggers[1] = 1.0;
                 }
             }
             if state.triggers[0] > 0.0
                 && !self.touch.crosshair()
                 && self.touch.aim.is_some()
+                && !self.touch.holding_use
                 && (tap_info.extinguish_fire
-                    || (!self.touch.hold_uses_item
-                        && tap_info.entity_hit
-                        && !tap_info.friendly_interact))
+                    || (tap_info.entity_hit && !tap_info.mob_feed_or_tool))
             {
                 state.triggers[0] = 0.0;
                 state.triggers[1] = 1.0;
             }
-            self.touch.context_use =
-                pre_info.hold_uses_item || pre_info.friendly_interact || pre_info.block_interact;
+            self.touch.context_use = pre_info.context_action;
             if state != PadState::default() || self.pad.injected != PadState::default() {
                 self.pad.injected = state;
             }
@@ -621,7 +687,12 @@ impl Game<'_> {
             // held again after it.
             _ if self.scripted_run() => PadState::default(),
             Some(state) => state,
-            None => self.pad.read(),
+            None => {
+                let base = self.pad.read();
+                #[cfg(target_os = "android")]
+                let base = base.merge(&horizon_client::android_runtime::pad_state());
+                base
+            }
         };
         // A Nintendo pad going by its letters is read that way: its own, or the one
         // splitscreen's router feeds this player.
@@ -884,11 +955,16 @@ impl Game<'_> {
                 Ok(())
             }
             Route::Sneak
-                if (self.settings.controller.toggle_sneak
-                    || (cfg!(target_os = "android")
-                        && !self.touch.vertical_movement
-                        && !self.touch.mounted))
-                    && !self.settings.toggle_crouch =>
+                if (self.settings.controller.toggle_sneak || {
+                    #[cfg(target_os = "android")]
+                    {
+                        !self.touch.vertical_movement && !self.touch.mounted
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        false
+                    }
+                }) && !self.settings.toggle_crouch =>
             {
                 // A stick click flips sneaking instead of holding it, as
                 // vanilla's toggle crouch does: a screen opening releases it

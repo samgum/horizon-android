@@ -29,6 +29,36 @@ static ANDROID_IME_CALLBACK: std::sync::OnceLock<fn(bool)> = std::sync::OnceLock
 static ANDROID_KEEP_SCREEN_ON_CALLBACK: std::sync::OnceLock<fn(bool)> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AndroidWindowInsets {
+    pub cutout: [u32; 4],
+    pub gesture_lr: [u32; 2],
+    pub ime_bottom: u32,
+}
+
+#[cfg(target_os = "android")]
+static ANDROID_WINDOW_INSETS: std::sync::Mutex<AndroidWindowInsets> =
+    std::sync::Mutex::new(AndroidWindowInsets {
+        cutout: [0; 4],
+        gesture_lr: [0; 2],
+        ime_bottom: 0,
+    });
+
+#[cfg(target_os = "android")]
+static ANDROID_TOAST_CALLBACK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_BOOT_PROGRESS_CALLBACK: std::sync::OnceLock<fn(&str, i32)> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_BOOT_READY_CALLBACK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_BOOT_DISMISSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
 pub fn set_android_app(app: android_activity::AndroidApp) {
     let _ = ANDROID_APP.set(app);
 }
@@ -41,6 +71,63 @@ pub fn set_android_ime_callback(cb: fn(bool)) {
 #[cfg(target_os = "android")]
 pub fn set_android_keep_screen_on_callback(cb: fn(bool)) {
     let _ = ANDROID_KEEP_SCREEN_ON_CALLBACK.set(cb);
+}
+
+#[cfg(target_os = "android")]
+pub fn set_android_toast_callback(cb: fn(&str)) {
+    let _ = ANDROID_TOAST_CALLBACK.set(cb);
+}
+
+#[cfg(target_os = "android")]
+pub fn set_android_boot_callbacks(progress: fn(&str, i32), ready: fn()) {
+    let _ = ANDROID_BOOT_PROGRESS_CALLBACK.set(progress);
+    let _ = ANDROID_BOOT_READY_CALLBACK.set(ready);
+}
+
+#[cfg(target_os = "android")]
+pub fn set_android_clipboard_callbacks(get: fn() -> Option<String>, set: fn(&str)) {
+    horizon_client::clipboard::set_android_clipboard_callbacks(get, set);
+}
+
+#[cfg(target_os = "android")]
+pub fn set_android_window_insets(insets: AndroidWindowInsets) {
+    if let Ok(mut guard) = ANDROID_WINDOW_INSETS.lock() {
+        *guard = insets;
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn android_window_insets() -> AndroidWindowInsets {
+    ANDROID_WINDOW_INSETS
+        .lock()
+        .map(|g| *g)
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn notify_android_toast(message: &str) {
+    if let Some(cb) = ANDROID_TOAST_CALLBACK.get() {
+        cb(message);
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn notify_android_boot_progress(stage: &str, percent: i32) {
+    if ANDROID_BOOT_DISMISSED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(cb) = ANDROID_BOOT_PROGRESS_CALLBACK.get() {
+        cb(stage, percent);
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn notify_android_boot_ready() {
+    if !ANDROID_BOOT_DISMISSED.swap(true, std::sync::atomic::Ordering::AcqRel)
+        && let Some(cb) = ANDROID_BOOT_READY_CALLBACK.get()
+    {
+        cb();
+    }
 }
 
 #[cfg(target_os = "android")]

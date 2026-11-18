@@ -1074,6 +1074,14 @@ struct Game<'a> {
     #[cfg(target_os = "android")]
     touch: horizon_client::touch::TouchControls,
     #[cfg(target_os = "android")]
+    container_touch: horizon_client::touch::container::ContainerTouch,
+    #[cfg(target_os = "android")]
+    touch_shift_override: bool,
+    #[cfg(target_os = "android")]
+    hotbar_hold: Option<(u64, usize, Instant, u8)>,
+    #[cfg(target_os = "android")]
+    tap_world_ray: Option<(([f64; 3], [f64; 3]), Instant)>,
+    #[cfg(target_os = "android")]
     last_back_press: Option<Instant>,
     #[cfg(target_os = "android")]
     touch_menu_drag: Option<(u64, f64, f64, f64, Instant, bool)>,
@@ -2348,26 +2356,31 @@ impl Game<'_> {
             return Some((eye, pick_view_vector(e.y_rot, e.x_rot)));
         }
         #[cfg(target_os = "android")]
-        if !self.touch.crosshair()
-            && let Some(point) = self.touch.aim
-        {
-            let eye = self.eye_position()?;
-            let forward = pick_view_vector(self.yaw, self.pitch);
-            let up = pick_view_vector(self.yaw, self.pitch - 90.0);
-            let aspect = self.renderer.as_ref().map_or(16.0 / 9.0, |r| {
-                f64::from(r.config.width.max(1)) / f64::from(r.config.height.max(1))
-            });
-            let fov = f64::from(self.settings.fov.max(30.0));
-            return Some((
-                eye,
-                horizon_client::touch::aim::screen_direction(
-                    forward,
-                    up,
-                    point,
-                    aspect,
-                    fov,
-                ),
-            ));
+        if !self.touch.crosshair() {
+            if let Some((ray, until)) = self.tap_world_ray
+                && Instant::now() < until
+            {
+                return Some(ray);
+            }
+            if let Some(point) = self.touch.aim {
+                let eye = self.eye_position()?;
+                let forward = pick_view_vector(self.yaw, self.pitch);
+                let up = pick_view_vector(self.yaw, self.pitch - 90.0);
+                let aspect = self.renderer.as_ref().map_or(16.0 / 9.0, |r| {
+                    f64::from(r.config.width.max(1)) / f64::from(r.config.height.max(1))
+                });
+                let fov = f64::from(self.settings.fov.max(30.0));
+                return Some((
+                    eye,
+                    horizon_client::touch::aim::screen_direction(
+                        forward,
+                        up,
+                        point,
+                        aspect,
+                        fov,
+                    ),
+                ));
+            }
         }
         Some((self.eye_position()?, pick_view_vector(self.yaw, self.pitch)))
     }
@@ -5069,12 +5082,30 @@ impl Game<'_> {
                 if let Some(win) = &self.window {
                     let s = win.inner_size();
                     self.touch.viewport(s.width, s.height);
+                    self.touch.safe_insets = Self::normalized_android_safe_insets(s.width, s.height);
                 }
                 let inv_x = (batch.width / 2.0 + 91.0 + 13.0) / batch.width.max(1.0);
                 let inv_y = (batch.height - 11.0) / batch.height.max(1.0);
                 let inv_size = 22.0 / batch.height.max(1.0);
                 self.touch.hotbar_edge = Some(([inv_x, inv_y], inv_size));
                 self.touch.draw(&mut batch, &self.gui.atlas);
+                if let Some((_, slot, since, _)) = self.hotbar_hold
+                    && self.inventory.get(slot).is_some_and(Option::is_some)
+                {
+                    let elapsed = since.elapsed().as_secs_f32();
+                    if elapsed >= 0.12 {
+                        let frac = ((elapsed - 0.12) / 0.83).clamp(0.0, 1.0);
+                        let sx = batch.width / 2.0 - 90.0 + slot as f32 * 20.0 + 2.0;
+                        let sy = batch.height - 19.0;
+                        let fill_h = 16.0 * frac;
+                        let col = if elapsed >= 0.45 {
+                            horizon_client::hud::rgba(255, 205, 65, 130)
+                        } else {
+                            horizon_client::hud::rgba(95, 235, 105, 120)
+                        };
+                        batch.fill(&self.gui.atlas, sx, sy + 16.0 - fill_h, 16.0, fill_h, col);
+                    }
+                }
             }
         }
         if show_hud {
@@ -5325,11 +5356,15 @@ impl Game<'_> {
                 let from = batch.vertices.len();
                 self.draw_inventory(&mut batch);
                 self.draw_pad_menu_guide(&mut batch, from);
+                #[cfg(target_os = "android")]
+                self.draw_android_container_overlay(&mut batch);
             }
             Screen::Creative => {
                 let from = batch.vertices.len();
                 self.draw_creative(&mut batch);
                 self.draw_pad_menu_guide(&mut batch, from);
+                #[cfg(target_os = "android")]
+                self.draw_android_container_overlay(&mut batch);
             }
             Screen::Chat => self.draw_chat_screen(&mut batch),
             Screen::Playing | Screen::Options | Screen::Win => {}
@@ -5351,11 +5386,11 @@ impl Game<'_> {
             self.draw_pad_guide(&mut batch, guide_from);
         }
         #[cfg(target_os = "android")]
-        if self.player.is_some() && self.screen != Screen::Playing {
-            let (bx, by, bw, bh) = (batch.width - 30.0, 8.0, 22.0, 22.0);
+        if self.android_close_button_shown() {
+            let [bx, by, bw, bh] = Self::android_close_button_rect(&batch);
             let a = &self.gui.atlas;
-            batch.fill(a, bx, by, bw, bh, horizon_client::hud::rgba(12, 12, 16, 165));
-            let border = horizon_client::hud::rgba(255, 255, 255, 200);
+            batch.fill(a, bx, by, bw, bh, horizon_client::hud::rgba(12, 12, 16, 175));
+            let border = horizon_client::hud::rgba(255, 255, 255, 205);
             batch.fill(a, bx, by, bw, 1.0, border);
             batch.fill(a, bx, by + bh - 1.0, bw, 1.0, border);
             batch.fill(a, bx, by, 1.0, bh, border);
@@ -5377,6 +5412,11 @@ impl Game<'_> {
         // `Gui.setScreen` clears the old screen's focus before it goes: the
         // key that closed the container (Tab bound to the inventory) has
         // already moved the focus, and it must not outlive the screen.
+        #[cfg(target_os = "android")]
+        {
+            self.container_touch.reset();
+            self.touch_shift_override = false;
+        }
         self.pad_clear_focus();
         self.mod_browser_closed();
         self.reset_inventory_clicks();
@@ -9053,12 +9093,266 @@ impl Game<'_> {
     /// it a handler both can call and a `gamepad::Route` (screenshot and fullscreen do this). A
     /// screen's own raw keys, text and mods' key hooks stay raw on purpose.
     #[cfg(target_os = "android")]
+    fn normalized_android_safe_insets(width: u32, height: u32) -> [f32; 4] {
+        let w = width.max(1) as f32;
+        let h = height.max(1) as f32;
+        let ins = crate::entry::android_window_insets();
+        [
+            (ins.cutout[0] as f32 / w).clamp(0.0, 0.25),
+            (ins.cutout[1] as f32 / h).clamp(0.0, 0.25),
+            (ins.cutout[2] as f32 / w).clamp(0.0, 0.25),
+            (ins.cutout[3] as f32 / h).clamp(0.0, 0.25),
+        ]
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_close_button_shown(&self) -> bool {
+        if self.pending_entry.is_some()
+            || self.integrated_starting.is_some()
+            || self.pack_reload.is_some()
+            || self.pending_save.is_some()
+        {
+            return false;
+        }
+        if self.title.is_some() {
+            return self.screen == Screen::Options
+                || self
+                    .title
+                    .as_ref()
+                    .is_some_and(|t| !matches!(t.mode, horizon_client::title::Mode::Main));
+        }
+        self.screen != Screen::Playing
+            || self.book.is_some()
+            || self.sign_edit.is_some()
+            || self.dialog_open()
+            || self.command_prompt.is_some()
+            || self.link_prompt.is_some()
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_close_button_rect(batch: &HudBatch) -> [f32; 4] {
+        let scale = batch.scale.max(1.0);
+        let ins = crate::entry::android_window_insets();
+        let safe_r = (ins.cutout[2] as f32 / scale).ceil();
+        let safe_t = (ins.cutout[1] as f32 / scale).ceil();
+        [batch.width - 28.0 - safe_r, 6.0 + safe_t, 22.0, 22.0]
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_escape_current_screen(&mut self, event_loop: &dyn EventLoopCtl) {
+        if self.dialog_open() {
+            let _ = self.dialog_key(KeyCode::Escape, None, None);
+            return;
+        }
+        if self.command_prompt.is_some() {
+            self.command_prompt_key(KeyCode::Escape);
+            return;
+        }
+        if self.link_prompt.is_some() {
+            self.answer_link_prompt(false);
+            return;
+        }
+        if self.server_packs.prompt.is_some() {
+            let _ = self.answer_pack_prompt(false);
+            return;
+        }
+        if self.sign_edit.is_some() {
+            self.sign_input(Some(KeyCode::Escape), None);
+            return;
+        }
+        if self.book.is_some() {
+            self.book_input(Some(KeyCode::Escape), None);
+            return;
+        }
+        if self.title_input_active() && self.screen != Screen::Options {
+            if let Some(title) = &mut self.title {
+                let action = title.escape();
+                let _ = self.title_action(event_loop, action);
+            }
+            return;
+        }
+        let _ = self.key_pressed(KeyCode::Escape, KeyCode::Escape);
+    }
+
+    #[cfg(target_os = "android")]
+    fn draw_android_container_overlay(&self, batch: &mut HudBatch) {
+        let panel = self.container_image_parts(batch);
+        let ins = crate::entry::android_window_insets();
+        let safe_left = (ins.cutout[0] as f32 / batch.scale.max(1.0)).ceil();
+        let carried_count = self.carried.as_ref().map_or(0, |c| c.count);
+        self.container_touch.draw(
+            batch,
+            &self.gui.atlas,
+            self.settings.touch.container_style,
+            panel,
+            safe_left,
+            carried_count,
+            Instant::now(),
+        );
+    }
+
+    #[cfg(target_os = "android")]
+    fn slot_rect_gui(&self, batch: &HudBatch, slot: usize) -> [f32; 4] {
+        if let Some(layout) = self.built_container(batch)
+            && let Some(&(_, r)) = layout.slots.iter().find(|&&(s, _)| s == slot)
+        {
+            return [r[0] + 1.0, r[1] + 1.0, 16.0, 16.0];
+        }
+        let (ox, oy) = self.inventory_origin_unbuilt(batch);
+        let (sx, sy) = self.slot_position(slot);
+        [ox + sx, oy + sy, 16.0, 16.0]
+    }
+
+    #[cfg(target_os = "android")]
+    fn slot_touch_info(
+        &self,
+        batch: &HudBatch,
+        gx: f32,
+        gy: f32,
+    ) -> Option<horizon_client::touch::container::SlotTouchInfo> {
+        let slot = self.slot_at(batch, gx, gy)?;
+        let rect = self.slot_rect_gui(batch, slot);
+        let splittable = slot != 200
+            && slot < Creative::DISPLAY
+            && !(slot == 309 && matches!(self.container_kind(), Some(BlockEntity::Crafter(_))));
+        let count = if slot >= Creative::DISPLAY {
+            let first = self.creative_screen.first_row(&self.pack.names);
+            u32::from(
+                self.creative_screen
+                    .shown(&self.pack.names, first * 9 + slot - Creative::DISPLAY)
+                    .is_some(),
+            )
+        } else {
+            self.slot_view(slot).map_or(0, |s| s.count)
+        };
+        Some(horizon_client::touch::container::SlotTouchInfo {
+            slot,
+            rect,
+            count,
+            splittable,
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) fn poll_android_touch_timers(&mut self) {
+        if let Some((_, slot, since, ref mut stage)) = self.hotbar_hold {
+            if self.screen != Screen::Playing || self.selected != slot {
+                self.hotbar_hold = None;
+            } else {
+                let elapsed = since.elapsed();
+                if *stage == 0 && elapsed >= Duration::from_millis(450) {
+                    *stage = 1;
+                    self.drop_held(false);
+                } else if *stage == 1 && elapsed >= Duration::from_millis(950) {
+                    *stage = 2;
+                    self.drop_held(true);
+                }
+            }
+        }
+        if matches!(self.screen, Screen::Inventory | Screen::Creative) {
+            let carried_count = self.carried.as_ref().map_or(0, |c| c.count);
+            let act = self.container_touch.poll(
+                Instant::now(),
+                self.settings.touch.container_style,
+                carried_count,
+            );
+            if act != horizon_client::touch::container::ContainerAction::None {
+                self.apply_container_slot_action(act);
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn apply_container_slot_action(
+        &mut self,
+        action: horizon_client::touch::container::ContainerAction,
+    ) {
+        use horizon_client::touch::container::ContainerAction;
+        let Some(size) = self
+            .renderer
+            .as_ref()
+            .map(|r| [r.config.width, r.config.height])
+        else {
+            return;
+        };
+        let batch = HudBatch::new(size, self.settings.gui_scale_inputs());
+        match action {
+            ContainerAction::SlotClick {
+                slot,
+                right,
+                quick_move,
+            } => {
+                let [sx, sy, sw, sh] = self.slot_rect_gui(&batch, slot);
+                self.cursor = (sx + sw / 2.0, sy + sh / 2.0);
+                self.touch_shift_override = quick_move;
+                if self.screen == Screen::Creative {
+                    self.click_creative(right);
+                    if !right {
+                        self.creative_screen.release();
+                    }
+                    self.inventory_mouse_release(right);
+                } else {
+                    self.inventory_press(right);
+                    if let Some(key) = self.container {
+                        self.container_changed(key);
+                    }
+                    self.inventory_mouse_release(right);
+                }
+                self.touch_shift_override = false;
+            }
+            ContainerAction::SplitExact { slot, take, total } => {
+                let [sx, sy, sw, sh] = self.slot_rect_gui(&batch, slot);
+                self.cursor = (sx + sw / 2.0, sy + sh / 2.0);
+                let half = total.div_ceil(2);
+                let (initial_right, put_back) = if take >= total {
+                    (false, 0)
+                } else if take <= half {
+                    (true, half - take)
+                } else {
+                    (false, total - take)
+                };
+                self.inventory_press(initial_right);
+                self.inventory_mouse_release(initial_right);
+                for _ in 0..put_back {
+                    self.inventory_press(true);
+                    self.inventory_mouse_release(true);
+                }
+                if let Some(key) = self.container {
+                    self.container_changed(key);
+                }
+            }
+            ContainerAction::DragStart { slot, right } => {
+                let [sx, sy, sw, sh] = self.slot_rect_gui(&batch, slot);
+                self.cursor = (sx + sw / 2.0, sy + sh / 2.0);
+                self.inventory_press(right);
+            }
+            ContainerAction::DragSlot(slot) => {
+                let [sx, sy, sw, sh] = self.slot_rect_gui(&batch, slot);
+                self.cursor = (sx + sw / 2.0, sy + sh / 2.0);
+                self.inventory_drag_move();
+            }
+            ContainerAction::DragEnd => {
+                let right = self.container_touch.half_mode;
+                self.inventory_mouse_release(right);
+            }
+            ContainerAction::DropCarried { all } => {
+                self.throw_click(!all, horizon_client::menu::Input::Pickup);
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(target_os = "android")]
     fn handle_touch_event(
         &mut self,
         event_loop: &dyn EventLoopCtl,
         touch: winit::event::Touch,
     ) {
+        use horizon_client::touch::container::ContainerAction;
         use winit::event::TouchPhase;
+        let _ = horizon_client::android_runtime::note_input(
+            horizon_client::android_gamepad::InputMode::Touch,
+        );
         let in_gameplay = self.screen == Screen::Playing
             && self.title.is_none()
             && self.player.is_some()
@@ -9072,26 +9366,134 @@ impl Game<'_> {
 
         if !in_gameplay {
             let device_id = touch.device_id;
+            if let Some(r) = &self.renderer {
+                let b = HudBatch::new(
+                    [r.config.width, r.config.height],
+                    self.settings.gui_scale_inputs(),
+                );
+                let gx = touch.location.x as f32 / b.scale;
+                let gy = touch.location.y as f32 / b.scale;
+                if matches!(touch.phase, TouchPhase::Started) && self.android_close_button_shown() {
+                    let [bx, by, bw, bh] = Self::android_close_button_rect(&b);
+                    if gx >= bx - 4.0
+                        && gx <= bx + bw + 4.0
+                        && gy >= by - 4.0
+                        && gy <= by + bh + 4.0
+                    {
+                        self.android_escape_current_screen(event_loop);
+                        return;
+                    }
+                }
+                // Container screens use our dedicated Bedrock/Classic touch controller!
+                if matches!(self.screen, Screen::Inventory | Screen::Creative)
+                    && !self.dialog_open()
+                    && !self.mod_browser_typing()
+                {
+                    let panel = self.container_image_parts(&b);
+                    let ins = crate::entry::android_window_insets();
+                    let safe_left = (ins.cutout[0] as f32 / b.scale.max(1.0)).ceil();
+                    let carried_count = self.carried.as_ref().map_or(0, |c| c.count);
+                    let style = self.settings.touch.container_style;
+                    match touch.phase {
+                        TouchPhase::Started => {
+                            self.focused = true;
+                            let info = self.slot_touch_info(&b, gx, gy);
+                            let act = self.container_touch.on_start(
+                                touch.id,
+                                [gx, gy],
+                                info,
+                                carried_count,
+                                style,
+                                panel,
+                                [b.width, b.height],
+                                safe_left,
+                                Instant::now(),
+                            );
+                            if let ContainerAction::PassThroughPress(_) = act {
+                                self.handle_window_event_inner(
+                                    event_loop,
+                                    WindowEvent::CursorMoved {
+                                        device_id,
+                                        position: touch.location,
+                                    },
+                                );
+                                self.handle_window_event_inner(
+                                    event_loop,
+                                    WindowEvent::MouseInput {
+                                        device_id,
+                                        state: ElementState::Pressed,
+                                        button: MouseButton::Left,
+                                    },
+                                );
+                                if self.text_field_focused() {
+                                    horizon_client::entry::notify_android_ime_active(true);
+                                }
+                            } else if act != ContainerAction::None {
+                                self.apply_container_slot_action(act);
+                            }
+                        }
+                        TouchPhase::Moved => {
+                            let hovered = self.slot_at(&b, gx, gy);
+                            let actions = self
+                                .container_touch
+                                .on_move(touch.id, [gx, gy], hovered, carried_count);
+                            self.cursor = (gx, gy);
+                            for act in actions {
+                                match act {
+                                    ContainerAction::Scroll(lines) => {
+                                        self.handle_window_event_inner(
+                                            event_loop,
+                                            WindowEvent::MouseWheel {
+                                                device_id,
+                                                delta: winit::event::MouseScrollDelta::LineDelta(
+                                                    0.0, lines,
+                                                ),
+                                                phase: TouchPhase::Moved,
+                                            },
+                                        );
+                                    }
+                                    other => self.apply_container_slot_action(other),
+                                }
+                            }
+                        }
+                        TouchPhase::Ended | TouchPhase::Cancelled => {
+                            let act = self.container_touch.on_end(
+                                touch.id,
+                                [gx, gy],
+                                carried_count,
+                                style,
+                                panel,
+                                [b.width, b.height],
+                                safe_left,
+                                Instant::now(),
+                            );
+                            if let ContainerAction::PassThroughRelease(_) = act {
+                                self.handle_window_event_inner(
+                                    event_loop,
+                                    WindowEvent::CursorMoved {
+                                        device_id,
+                                        position: touch.location,
+                                    },
+                                );
+                                self.handle_window_event_inner(
+                                    event_loop,
+                                    WindowEvent::MouseInput {
+                                        device_id,
+                                        state: ElementState::Released,
+                                        button: MouseButton::Left,
+                                    },
+                                );
+                            } else if act != ContainerAction::None {
+                                self.apply_container_slot_action(act);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
             match touch.phase {
                 TouchPhase::Started => {
                     self.focused = true;
-                    if self.player.is_some()
-                        && self.screen != Screen::Playing
-                        && let Some(r) = &self.renderer
-                    {
-                        let b = HudBatch::new(
-                            [r.config.width, r.config.height],
-                            self.settings.gui_scale_inputs(),
-                        );
-                        let gx = touch.location.x as f32 / b.scale;
-                        let gy = touch.location.y as f32 / b.scale;
-                        if gx >= b.width - 34.0 && gx <= b.width - 4.0 && gy >= 4.0 && gy <= 34.0
-                        {
-                            self.close_container();
-                            self.set_screen(Screen::Playing);
-                            return;
-                        }
-                    }
                     self.touch_menu_drag = Some((
                         touch.id,
                         touch.location.x,
@@ -9152,7 +9554,7 @@ impl Game<'_> {
                     }
                 }
                 TouchPhase::Ended | TouchPhase::Cancelled => {
-                    let drag = self.touch_menu_drag.take().filter(|(id, ..)| *id == touch.id);
+                    let _ = self.touch_menu_drag.take().filter(|(id, ..)| *id == touch.id);
                     self.handle_window_event_inner(
                         event_loop,
                         WindowEvent::CursorMoved {
@@ -9168,28 +9570,6 @@ impl Game<'_> {
                             button: MouseButton::Left,
                         },
                     );
-                    if let Some((_, _, _, _, started_at, scrolled)) = drag
-                        && !scrolled
-                        && started_at.elapsed() >= Duration::from_millis(380)
-                        && self.player.is_some()
-                    {
-                        self.handle_window_event_inner(
-                            event_loop,
-                            WindowEvent::MouseInput {
-                                device_id,
-                                state: ElementState::Pressed,
-                                button: MouseButton::Right,
-                            },
-                        );
-                        self.handle_window_event_inner(
-                            event_loop,
-                            WindowEvent::MouseInput {
-                                device_id,
-                                state: ElementState::Released,
-                                button: MouseButton::Right,
-                            },
-                        );
-                    }
                 }
             }
             return;
@@ -9206,6 +9586,7 @@ impl Game<'_> {
         let (x, y) = (touch.location.x, touch.location.y);
         self.touch.settings = self.settings.touch.clone();
         self.touch.viewport(w as u32, h as u32);
+        self.touch.safe_insets = Self::normalized_android_safe_insets(w as u32, h as u32);
         let point = [
             (x as f32 / w as f32).clamp(0.0, 1.0),
             (y as f32 / h as f32).clamp(0.0, 1.0),
@@ -9215,11 +9596,15 @@ impl Game<'_> {
             TouchPhase::Started => {
                 self.focused = true;
                 self.captured = true;
-                // Edge guard for Android full-screen gesture navigation.
-                if x < 24.0 || x > w - 24.0 {
+                let ins = crate::entry::android_window_insets();
+                let edge_l = f64::from(ins.gesture_lr[0].max(16)).min(48.0);
+                let edge_r = f64::from(ins.gesture_lr[1].max(16)).min(48.0);
+                // Guard against system back-swipe edges unless landing on a touch control.
+                if (x < edge_l || x > w - edge_r) && self.touch.control_at(point).is_none() {
                     return;
                 }
-                let gui_batch = HudBatch::new([w as u32, h as u32], self.settings.gui_scale_inputs());
+                let gui_batch =
+                    HudBatch::new([w as u32, h as u32], self.settings.gui_scale_inputs());
                 let gui_pt = [
                     (x as f32 / gui_batch.scale).clamp(0.0, gui_batch.width),
                     (y as f32 / gui_batch.scale).clamp(0.0, gui_batch.height),
@@ -9229,7 +9614,9 @@ impl Game<'_> {
                     gui_batch.height,
                     gui_pt,
                 ) {
-                    self.selected = slot.min(8);
+                    let s = slot.min(8);
+                    self.selected = s;
+                    self.hotbar_hold = Some((touch.id, s, Instant::now(), 0));
                     return;
                 }
                 if !self.touch.crosshair() && self.touch.control_at(point).is_none() {
@@ -9238,17 +9625,42 @@ impl Game<'_> {
                 }
                 let _ = self.touch.update(touch.id, point, true, false);
                 if std::mem::take(&mut self.touch.settings_requested) {
-                    self.set_screen(Screen::Options);
+                    self.open_options_at(false, horizon_client::options_ui::Page::Controls);
+                    self.capture(false);
                     return;
                 }
                 if std::mem::take(&mut self.touch.chat_requested) {
-                    self.set_screen(Screen::Chat);
+                    self.open_chat_method("");
                     return;
                 }
-                self.touch.debug_requested = false;
-                self.touch.perspective_requested = false;
+                if std::mem::take(&mut self.touch.debug_requested) {
+                    self.set_debug_overlay(!self.debug);
+                    return;
+                }
+                if std::mem::take(&mut self.touch.perspective_requested) {
+                    if !self.replay.playing() {
+                        self.cycle_camera();
+                    }
+                    return;
+                }
             }
             TouchPhase::Moved => {
+                if let Some((hid, slot, ..)) = self.hotbar_hold
+                    && hid == touch.id
+                {
+                    let gui_batch =
+                        HudBatch::new([w as u32, h as u32], self.settings.gui_scale_inputs());
+                    let gui_pt = [
+                        (x as f32 / gui_batch.scale).clamp(0.0, gui_batch.width),
+                        (y as f32 / gui_batch.scale).clamp(0.0, gui_batch.height),
+                    ];
+                    if horizon_client::touch::hotbar_slot(gui_batch.width, gui_batch.height, gui_pt)
+                        != Some(slot)
+                    {
+                        self.hotbar_hold = None;
+                    }
+                    return;
+                }
                 let delta = self.touch.update(touch.id, point, false, false);
                 if delta != [0.0, 0.0] {
                     let deg = horizon_client::touch::aim::camera_delta(
@@ -9257,14 +9669,37 @@ impl Game<'_> {
                         h as u32,
                         &self.touch.settings,
                     );
-                    self.yaw = (self.yaw + deg[0]).rem_euclid(360.0);
-                    self.pitch = (self.pitch + deg[1]).clamp(-90.0, 90.0);
-                    self.tutorial
-                        .mouse(f64::from(deg[0]) * 6.0, f64::from(deg[1]) * 6.0);
+                    let sign_y = if self.settings.invert_y { -1.0 } else { 1.0 };
+                    self.look_turn(
+                        f64::from(deg[0]) / 0.15,
+                        f64::from(deg[1] * sign_y) / 0.15,
+                    );
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
+                if self.hotbar_hold.is_some_and(|(hid, ..)| hid == touch.id) {
+                    self.hotbar_hold = None;
+                    return;
+                }
                 let _ = self.touch.update(touch.id, point, false, true);
+                if !self.touch.crosshair()
+                    && let Some(eye) = self.eye_position()
+                {
+                    let aim_pt = if self.touch.projectile_crosshair {
+                        [0.5, 0.5]
+                    } else {
+                        point
+                    };
+                    let forward = pick_view_vector(self.yaw, self.pitch);
+                    let up = pick_view_vector(self.yaw, self.pitch - 90.0);
+                    let aspect = w / h.max(1.0);
+                    let fov = f64::from(self.settings.fov.max(30.0));
+                    let dir = horizon_client::touch::aim::screen_direction(
+                        forward, up, aim_pt, aspect, fov,
+                    );
+                    self.tap_world_ray =
+                        Some(((eye, dir), Instant::now() + Duration::from_millis(120)));
+                }
             }
         }
     }
@@ -9306,6 +9741,7 @@ impl Game<'_> {
                         event_loop.exit();
                     } else {
                         self.last_back_press = Some(now);
+                        crate::entry::notify_android_toast("再按一次返回键退出 / Press back again to exit");
                     }
                     return;
                 } else {
@@ -11018,6 +11454,14 @@ impl<'a> Game<'a> {
             physical_keys: HashSet::new(),
             #[cfg(target_os = "android")]
             touch: horizon_client::touch::TouchControls::default(),
+            #[cfg(target_os = "android")]
+            container_touch: Default::default(),
+            #[cfg(target_os = "android")]
+            touch_shift_override: false,
+            #[cfg(target_os = "android")]
+            hotbar_hold: None,
+            #[cfg(target_os = "android")]
+            tap_world_ray: None,
             #[cfg(target_os = "android")]
             last_back_press: None,
             #[cfg(target_os = "android")]

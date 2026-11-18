@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Centered isometric grass block within Android 12+ 72dp splash safe zone (never stretches) -->
+    <!-- Top grass face -->
+    <path
+        android:fillColor="#5DBB46"
+        android:pathData="M54,34 L72,44 L54,54 L36,44 Z" />
+    <!-- Left dirt face -->
+    <path
+        android:fillColor="#8B5A2B"
+        android:pathData="M36,44 L54,54 L54,74 L36,64 Z" />
+    <!-- Right shaded dirt face -->
+    <path
+        android:fillColor="#6E4520"
+        android:pathData="M54,54 L72,44 L72,64 L54,74 Z" />
+    <!-- Left grass overhang -->
+    <path
+        android:fillColor="#4CA338"
+        android:pathData="M36,44 L54,54 L54,59 L36,49 Z" />
+    <!-- Right grass overhang -->
+    <path
+        android:fillColor="#3D872C"
+        android:pathData="M54,54 L72,44 L72,49 L54,59 Z" />
+</vector>

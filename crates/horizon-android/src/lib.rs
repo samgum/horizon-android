@@ -1,7 +1,8 @@
 use android_activity::AndroidApp;
 use horizon_client::entry::{
-    AndroidImeEvent, push_android_ime, set_android_ime_callback,
-    set_android_keep_screen_on_callback,
+    AndroidImeEvent, AndroidWindowInsets, push_android_ime, set_android_boot_callbacks,
+    set_android_clipboard_callbacks, set_android_ime_callback, set_android_keep_screen_on_callback,
+    set_android_toast_callback, set_android_window_insets,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString, JValue};
@@ -50,6 +51,30 @@ pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeOnImeKey(
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_horizon_android_HorizonActivity_nativeOnWindowInsets(
+    _env: JNIEnv,
+    _class: JClass,
+    cutout_left: jni::sys::jint,
+    cutout_top: jni::sys::jint,
+    cutout_right: jni::sys::jint,
+    cutout_bottom: jni::sys::jint,
+    gesture_left: jni::sys::jint,
+    gesture_right: jni::sys::jint,
+    ime_bottom: jni::sys::jint,
+) {
+    set_android_window_insets(AndroidWindowInsets {
+        cutout: [
+            cutout_left.max(0) as u32,
+            cutout_top.max(0) as u32,
+            cutout_right.max(0) as u32,
+            cutout_bottom.max(0) as u32,
+        ],
+        gesture_lr: [gesture_left.max(0) as u32, gesture_right.max(0) as u32],
+        ime_bottom: ime_bottom.max(0) as u32,
+    });
+}
+
 fn register_ime_natives(app: &AndroidApp) {
     unsafe {
         let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
@@ -82,6 +107,12 @@ fn register_ime_natives(app: &AndroidApp) {
                     name: "nativeOnImeKey".into(),
                     sig: "(I)V".into(),
                     fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeOnImeKey
+                        as *mut std::ffi::c_void,
+                },
+                jni::NativeMethod {
+                    name: "nativeOnWindowInsets".into(),
+                    sig: "(IIIIIII)V".into(),
+                    fn_ptr: Java_dev_horizon_android_HorizonActivity_nativeOnWindowInsets
                         as *mut std::ffi::c_void,
                 },
             ];
@@ -120,12 +151,132 @@ fn call_java_bool_method(method: &str, value: bool) {
     }
 }
 
+fn call_java_string_method(method: &str, text: &str) {
+    let Some(app) = ANDROID_APP_FOR_IME.get() else {
+        return;
+    };
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return;
+        }
+        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
+            return;
+        };
+        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
+            return;
+        };
+        let activity = JObject::from_raw(act_ptr);
+        if let Ok(jstr) = env.new_string(text) {
+            let _ = env.call_method(
+                &activity,
+                method,
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&jstr)],
+            );
+        }
+        std::mem::forget(activity);
+    }
+}
+
+fn jni_get_clipboard() -> Option<String> {
+    let app = ANDROID_APP_FOR_IME.get()?;
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return None;
+        }
+        let vm = jni::JavaVM::from_raw(vm_ptr).ok()?;
+        let mut env = vm
+            .get_env()
+            .or_else(|_| vm.attach_current_thread_permanently())
+            .ok()?;
+        let activity = JObject::from_raw(act_ptr);
+        let res = env
+            .call_method(&activity, "getClipboardText", "()Ljava/lang/String;", &[])
+            .ok()
+            .and_then(|v| v.l().ok())
+            .and_then(|obj| {
+                if obj.is_null() {
+                    None
+                } else {
+                    env.get_string(&JString::from(obj))
+                        .ok()
+                        .map(|s| String::from(s))
+                }
+            });
+        std::mem::forget(activity);
+        res
+    }
+}
+
+fn jni_set_clipboard(text: &str) {
+    call_java_string_method("setClipboardText", text);
+}
+
 fn notify_java_ime(active: bool) {
     call_java_bool_method("setImeActive", active);
 }
 
 fn notify_java_keep_screen_on(keep_on: bool) {
     call_java_bool_method("setKeepScreenOn", keep_on);
+}
+
+fn notify_java_toast(message: &str) {
+    call_java_string_method("showToast", message);
+}
+
+fn notify_java_boot_progress(stage: &str, percent: i32) {
+    let Some(app) = ANDROID_APP_FOR_IME.get() else {
+        return;
+    };
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return;
+        }
+        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
+            return;
+        };
+        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
+            return;
+        };
+        let activity = JObject::from_raw(act_ptr);
+        if let Ok(jstr) = env.new_string(stage) {
+            let _ = env.call_method(
+                &activity,
+                "updateBootProgress",
+                "(Ljava/lang/String;I)V",
+                &[JValue::Object(&jstr), JValue::Int(percent)],
+            );
+        }
+        std::mem::forget(activity);
+    }
+}
+
+fn notify_java_boot_ready() {
+    let Some(app) = ANDROID_APP_FOR_IME.get() else {
+        return;
+    };
+    unsafe {
+        let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+        let act_ptr = app.activity_as_ptr() as jni::sys::jobject;
+        if vm_ptr.is_null() || act_ptr.is_null() {
+            return;
+        }
+        let Ok(vm) = jni::JavaVM::from_raw(vm_ptr) else {
+            return;
+        };
+        let Ok(mut env) = vm.get_env().or_else(|_| vm.attach_current_thread_permanently()) else {
+            return;
+        };
+        let activity = JObject::from_raw(act_ptr);
+        let _ = env.call_method(&activity, "dismissBootSplash", "()V", &[]);
+        std::mem::forget(activity);
+    }
 }
 
 #[used]
@@ -142,8 +293,11 @@ static INIT_RUST_MIN_STACK: extern "C" fn() = {
 fn extract_bundled_resources(app: &AndroidApp, target_dir: &Path) -> Result<(), String> {
     let marker = target_dir.join(".extracted_26_3");
     if marker.is_file() && target_dir.join("horizon-resources.json").is_file() {
+        notify_java_boot_progress("正在启动引擎…", 18);
         return Ok(());
     }
+    let _ = fs::remove_file(&marker);
+    notify_java_boot_progress("首次启动：正在解压游戏资源 (0%)…", 2);
     fs::create_dir_all(target_dir).map_err(|e| format!("create resources dir: {e}"))?;
     let assets = app.asset_manager();
     let asset = assets
@@ -152,6 +306,8 @@ fn extract_bundled_resources(app: &AndroidApp, target_dir: &Path) -> Result<(), 
     let mut archive =
         zip::ZipArchive::new(asset).map_err(|e| format!("open resources.zip: {e}"))?;
 
+    let total = archive.len().max(1);
+    let mut last_pct = 0usize;
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
@@ -168,11 +324,21 @@ fn extract_bundled_resources(app: &AndroidApp, target_dir: &Path) -> Result<(), 
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
-            let mut out_file = fs::File::create(&out_path)
+            let out_file = fs::File::create(&out_path)
                 .map_err(|e| format!("create {}: {e}", out_path.display()))?;
-            io::copy(&mut file, &mut out_file)
+            let mut writer = io::BufWriter::with_capacity(64 * 1024, out_file);
+            io::copy(&mut file, &mut writer)
                 .map_err(|e| format!("write {}: {e}", out_path.display()))?;
         }
+        let pct = ((i + 1) * 100) / total;
+        if pct >= last_pct + 2 || i + 1 == total {
+            last_pct = pct;
+            let bar_pct = 2 + ((pct as i32) * 43) / 100;
+            notify_java_boot_progress(&format!("首次启动：正在解压游戏资源 ({pct}%)…"), bar_pct);
+        }
+    }
+    if !target_dir.join("horizon-resources.json").is_file() {
+        return Err("extracted archive did not contain horizon-resources.json".to_owned());
     }
     fs::write(&marker, b"ok").map_err(|e| format!("write marker: {e}"))?;
     Ok(())
@@ -202,15 +368,21 @@ fn run_android(app: AndroidApp) {
     let _ = fs::create_dir_all(&game_dir);
     let _ = std::env::set_current_dir(&game_dir);
 
-    if let Err(err) = extract_bundled_resources(&app, &resources_dir) {
-        let _ = fs::write(base_dir.join("extract_error.log"), &err);
-        eprintln!("Horizon Android resource extraction failed: {err}");
-    }
-
     register_ime_natives(&app);
     let _ = ANDROID_APP_FOR_IME.set(app.clone());
     set_android_ime_callback(notify_java_ime);
     set_android_keep_screen_on_callback(notify_java_keep_screen_on);
+    set_android_toast_callback(notify_java_toast);
+    set_android_boot_callbacks(notify_java_boot_progress, notify_java_boot_ready);
+    set_android_clipboard_callbacks(jni_get_clipboard, jni_set_clipboard);
+
+    if let Err(err) = extract_bundled_resources(&app, &resources_dir) {
+        let _ = fs::write(base_dir.join("extract_error.log"), &err);
+        eprintln!("Horizon Android resource extraction failed: {err}");
+        notify_java_boot_progress(&format!("资源准备异常: {err}"), 45);
+    }
+
+    notify_java_boot_progress("正在初始化核心运行环境…", 48);
     horizon_client::entry::set_android_app(app);
     let args = vec![
         "--resources".to_owned(),

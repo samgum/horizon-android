@@ -70,6 +70,7 @@ fn shield_uses_the_use_button_in_crosshair_layouts() {
         shield_available: true,
         ..TouchControls::default()
     };
+    t.settings.mode = Mode::Crosshair;
     assert!(!t.visible(Control::Shield));
     let p = t.placement(Control::Use).center;
     t.update(1, p, true, false);
@@ -103,6 +104,9 @@ fn shield_uses_the_use_button_in_crosshair_layouts() {
 #[test]
 fn sprint_toggle_survives_release_and_clears_with_focus() {
     let mut t = TouchControls::default();
+    t.settings.mode = Mode::Crosshair;
+    t.settings.sprint_button = true;
+    t.settings.sprint_with_joystick = false;
     t.settings.sprint_toggle = true;
     let point = t.placement(Control::Sprint).center;
     t.update(1, point, true, false);
@@ -137,8 +141,9 @@ fn big_controls_stay_on_narrow_and_wide_surfaces() {
     let mut t = TouchControls::default();
     for (w, h) in [(400, 1000), (1920, 1080)] {
         t.viewport(w, h);
-        t.settings.layouts[0][Control::Jump as usize].center = [0.99, 0.99];
-        t.settings.layouts[0][Control::Jump as usize].size = 0.45;
+        let idx = t.settings.mode.index();
+        t.settings.layouts[idx][Control::Jump as usize].center = [0.99, 0.99];
+        t.settings.layouts[idx][Control::Jump as usize].size = 0.45;
         t.settings.button_scale = 2.0;
         let r = t.placement(Control::Jump).rect(t.aspect());
         assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= 1.0001 && r[1] + r[3] <= 1.0001);
@@ -148,6 +153,9 @@ fn big_controls_stay_on_narrow_and_wide_surfaces() {
 #[test]
 fn portrait_spreads_the_factory_top_row_but_not_moved_buttons() {
     let mut t = TouchControls::default();
+    for c in [Control::Debug, Control::Settings, Control::Perspective] {
+        t.settings.button_visibility[c as usize] = layout::SHOWN;
+    }
     t.viewport(480, 854);
     let top = [
         Control::Debug,
@@ -163,7 +171,8 @@ fn portrait_spreads_the_factory_top_row_but_not_moved_buttons() {
     for pair in rects.windows(2) {
         assert!(pair[0][0] + pair[0][2] < pair[1][0]);
     }
-    t.settings.layouts[0][Control::Chat as usize].center = [0.25, 0.2];
+    let idx = t.settings.mode.index();
+    t.settings.layouts[idx][Control::Chat as usize].center = [0.25, 0.2];
     assert_eq!(t.placement(Control::Chat).center, [0.25, 0.2]);
 }
 
@@ -173,6 +182,7 @@ fn shortcut_only_overlay_keeps_menus_without_movement() {
         auxiliary_only: true,
         ..TouchControls::default()
     };
+    t.settings.button_visibility[Control::Debug as usize] = layout::SHOWN;
     assert!(!t.visible(Control::Move) && !t.visible(Control::Jump));
     assert!(t.visible(Control::Debug));
     let at = t.placement(Control::Debug).center;
@@ -187,6 +197,9 @@ fn shortcut_only_overlay_keeps_menus_without_movement() {
 #[test]
 fn shortcuts_take_their_finger_and_leave_movement_alone() {
     let mut t = TouchControls::default();
+    for c in [Control::Debug, Control::Settings, Control::Perspective] {
+        t.settings.button_visibility[c as usize] = layout::SHOWN;
+    }
     t.update(1, [0.13, 0.76], true, false);
     t.update(1, [0.13, 0.68], false, false);
     let moving = t.poll_state().left;
@@ -214,15 +227,17 @@ fn shortcuts_take_their_finger_and_leave_movement_alone() {
 fn contextual_use_button_is_opt_in_and_stays_until_release() {
     let mut t = TouchControls::default();
     t.settings.mode = Mode::Tap;
+    t.settings.contextual_interact = false;
     t.context_use = true;
     assert!(!t.visible(Control::Use));
     t.settings.contextual_interact = true;
     assert!(t.visible(Control::Use));
-    t.update(1, [0.92, 0.52], true, false);
+    let use_pt = t.placement(Control::Use).center;
+    t.update(1, use_pt, true, false);
     t.context_use = false;
     assert!(t.visible(Control::Use));
     assert_eq!(t.poll_state().triggers[0], 1.0);
-    t.update(1, [0.92, 0.52], false, true);
+    t.update(1, use_pt, false, true);
     assert!(!t.visible(Control::Use));
     t.settings.mode = Mode::Crosshair;
     assert!(t.visible(Control::Use));
@@ -231,27 +246,31 @@ fn contextual_use_button_is_opt_in_and_stays_until_release() {
 #[test]
 fn quick_taps_survive_one_poll_and_shared_buttons_release_together() {
     let mut t = TouchControls::default();
-    t.update(1, [0.92, 0.78], true, false);
-    t.update(1, [0.92, 0.78], false, true);
+    t.settings.mode = Mode::Crosshair;
+    let jump = t.placement(Control::Jump).center;
+    let attack = t.placement(Control::Attack).center;
+    t.update(1, jump, true, false);
+    t.update(1, jump, false, true);
     assert!(t.poll_state().held(Button::South));
     assert!(!t.poll_state().held(Button::South));
-    t.update(2, [0.80, 0.64], true, false);
-    t.update(3, [0.80, 0.64], true, false);
-    t.update(2, [0.80, 0.64], false, true);
+    t.update(2, attack, true, false);
+    t.update(3, attack, true, false);
+    t.update(2, attack, false, true);
     assert_eq!(t.state().triggers[1], 1.0);
-    t.update(3, [0.80, 0.64], false, true);
+    t.update(3, attack, false, true);
     assert_eq!(t.state().triggers[1], 0.0);
 }
 
 #[test]
 fn joystick_camera_and_jump_have_their_own_fingers() {
     let mut t = TouchControls::default();
+    let jump = t.placement(Control::Jump).center;
     t.update(1, [0.13, 0.76], true, false);
     t.update(1, [0.20, 0.64], false, false);
     t.update(2, [0.6, 0.4], true, false);
     let d = t.update(2, [0.65, 0.45], false, false);
     assert!((d[0] - 0.05).abs() < 0.0001);
-    t.update(3, [0.92, 0.78], true, false);
+    t.update(3, jump, true, false);
     assert!(t.state().held(Button::South));
     assert!(t.state().left[0] > 0.6);
     // A second finger on the joystick neither moves nor steals it.
@@ -267,49 +286,76 @@ fn joystick_camera_and_jump_have_their_own_fingers() {
 fn joystick_sprint_starts_past_the_rim_and_stops_inside() {
     let mut t = TouchControls::default();
     t.settings.sprint_with_joystick = true;
-    t.update(1, [0.13, 0.76], true, false);
-    t.update(1, [0.13, 0.62], false, false);
+    t.update(1, [0.145, 0.72], true, false);
+    t.update(1, [0.145, 0.62], false, false);
     assert!(!t.state().held(Button::LeftStick));
-    t.update(1, [0.13, 0.58], false, false);
+    t.update(1, [0.145, 0.55], false, false);
     assert!(t.state().held(Button::LeftStick));
     assert!((t.state().left[1] - 1.0).abs() < 1e-6);
-    t.update(1, [0.13, 0.62], false, false);
+    t.update(1, [0.145, 0.62], false, false);
     assert!(!t.state().held(Button::LeftStick));
 }
 
 #[test]
-fn dpad_slides_between_directions_crouches_on_double_tap_and_mirrors() {
+fn dpad_slides_from_centre_crouches_on_double_tap_and_mirrors() {
     let mut t = TouchControls::default();
     t.settings.mode = Mode::Dpad;
-    t.update(1, [0.13, 0.66], true, false);
-    assert_eq!(t.state().left, [0.0, 1.0]);
-    t.update(1, [0.20, 0.76], false, false);
+    let center = t.placement(Control::Move).center;
+    // Landing on the centre cell and sliding right walks right without getting stuck!
+    t.update(1, center, true, false);
+    t.update(1, [center[0] + 0.07, center[1]], false, false);
     assert_eq!(t.state().left, [1.0, 0.0]);
-    t.clear();
-    t.update(10, [0.13, 0.76], true, false);
+    t.update(1, [center[0] + 0.07, center[1]], false, true);
+    // Because finger 1 slid out to walk, a single tap next is NOT a crouch double-tap.
+    t.update(10, center, true, false);
     assert!(!t.poll_state().held(Button::RightStick));
-    t.update(10, [0.13, 0.76], false, true);
-    t.update(12, [0.13, 0.76], true, false);
+    t.update(10, center, false, true);
+    t.update(12, center, true, false);
     assert!(t.poll_state().held(Button::RightStick));
     t.clear();
     // Flying, the centre holds sneak (fly down) at once.
     t.vertical_movement = true;
-    t.update(13, [0.13, 0.76], true, false);
+    t.update(13, center, true, false);
     assert!(t.state().held(Button::RightStick));
     t.clear();
     t.vertical_movement = false;
     t.settings.swap_jump_sneak = true;
-    t.update(11, [0.13, 0.76], true, false);
+    t.update(11, center, true, false);
     assert!(t.state().held(Button::South));
     t.clear();
     t.settings.left_handed = true;
-    t.update(2, [0.87, 0.66], true, false);
+    t.update(2, [1.0 - center[0], center[1] - 0.08], true, false);
     assert_eq!(t.state().left, [0.0, 1.0]);
+}
+
+#[test]
+fn double_tap_jump_requests_creative_flight_toggle() {
+    let mut t = TouchControls::default();
+    t.can_fly = true;
+    let jump = t.placement(Control::Jump).center;
+    t.update(1, jump, true, false);
+    t.update(1, jump, false, true);
+    assert!(!t.fly_toggle_requested);
+    t.update(2, jump, true, false);
+    assert!(t.fly_toggle_requested);
+}
+
+#[test]
+fn safe_insets_keep_controls_clear_of_cutouts() {
+    let mut t = TouchControls::default();
+    t.viewport(2400, 1080);
+    t.safe_insets = [0.06, 0.02, 0.05, 0.04];
+    let move_rect = t.placement(Control::Move).rect(t.aspect());
+    assert!(move_rect[0] >= 0.06 - 1e-4);
+    let jump_rect = t.placement(Control::Jump).rect(t.aspect());
+    assert!(jump_rect[0] + jump_rect[2] <= 0.95 + 1e-4);
 }
 
 #[test]
 fn hidden_sprint_button_sends_nothing() {
     let mut t = TouchControls::default();
+    t.settings.mode = Mode::Crosshair;
+    t.settings.sprint_with_joystick = false;
     t.settings.sprint_button = false;
     let center = t.settings.placement(Control::Sprint).center;
     t.update(1, center, true, false);

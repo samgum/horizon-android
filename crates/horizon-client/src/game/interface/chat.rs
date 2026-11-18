@@ -1445,6 +1445,52 @@ impl Game<'_> {
             }
         }
         if let Some(screen) = self.ui.chat_screen.as_mut() {
+            #[cfg(target_os = "android")]
+            {
+                let scale = self.renderer.as_ref().map_or(2.0, |r| {
+                    HudBatch::new(
+                        [r.config.width, r.config.height],
+                        self.settings.gui_scale_inputs(),
+                    )
+                    .scale
+                });
+                let bar = Self::android_chat_bar(&self.settings, scale);
+                screen.set_mobile_bar(&m, Some(bar));
+                let bounds = screen.bar_bounds();
+                for (idx, (_, [bx, by, bw, bh])) in Self::android_chat_buttons(bounds)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if cursor.0 >= bx
+                        && cursor.0 <= bx + bw
+                        && cursor.1 >= by
+                        && cursor.1 <= by + bh
+                    {
+                        match idx {
+                            0 => self.chat_key_code(KeyCode::Tab, None),
+                            1 => self.chat_key_code(KeyCode::ArrowUp, None),
+                            2 => self.chat_key_code(KeyCode::ArrowDown, None),
+                            3 => {
+                                if let Some(s) = self.ui.chat_screen.as_mut() {
+                                    let m = Measure(&self.gui.atlas.font);
+                                    let c = Commands {
+                                        dispatcher: chat_tree(&self.remote),
+                                        registries: &self.ui.registries,
+                                    };
+                                    s.shortcut(
+                                        &m,
+                                        &c,
+                                        horizon_client::clipboard::EditShortcut::Paste,
+                                        &mut self.clipboard,
+                                    );
+                                }
+                            }
+                            _ => self.chat_key_code(KeyCode::Enter, None),
+                        }
+                        return;
+                    }
+                }
+            }
             if screen.click(&m, &c, cursor.0 as f64, cursor.1 as f64) {
                 self.notify_chat_suggestion_completion();
                 return;
@@ -1737,6 +1783,44 @@ impl Game<'_> {
         }
         Some(horizon_protocol::crypto::uuid_string(bits))
     }
+    #[cfg(target_os = "android")]
+    fn android_chat_bar(
+        settings: &horizon_client::settings::Settings,
+        scale: f32,
+    ) -> horizon_client::chat::MobileChatBar {
+        let scale = scale.max(1.0);
+        let insets = crate::entry::android_window_insets();
+        let top = settings.touch.chat_position == horizon_client::touch::ChatBarPosition::Top;
+        let top_y = ((insets.cutout[1] as f32 / scale).ceil() as i32 + 8).max(8);
+        let bottom_inset = (insets.ime_bottom as f32 / scale).ceil() as i32;
+        let safe_right = (insets.cutout[2] as f32 / scale).ceil() as i32;
+        let right_reserve = safe_right + 132 + if top { 30 } else { 4 };
+        horizon_client::chat::MobileChatBar {
+            top,
+            top_y,
+            bottom_inset,
+            right_reserve,
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn android_chat_buttons([_, y0, x1, _]: [i32; 4]) -> [(&'static str, [f32; 4]); 5] {
+        let specs: [(&str, f32); 5] = [
+            ("Tab", 24.0),
+            ("^", 16.0),
+            ("v", 16.0),
+            ("Paste", 32.0),
+            ("Send", 30.0),
+        ];
+        let mut x = x1 as f32 + 3.0;
+        let y = y0 as f32;
+        specs.map(|(label, w)| {
+            let rect = [x, y, w, 14.0];
+            x += w + 2.0;
+            (label, rect)
+        })
+    }
+
     pub(super) fn draw_chat_screen(&mut self, batch: &mut HudBatch) {
         self.draw_screen_phase(batch, horizon_client::screen_draw::RenderPhase::Background);
         self.gui_layer("minecraft:chat", batch, |g, batch| g.draw_chat(batch));
@@ -1757,6 +1841,12 @@ impl Game<'_> {
         });
         // The build made the box at this size (`ChatScreen.resize`).
         let m = Measure(&self.gui.atlas.font);
+        #[cfg(target_os = "android")]
+        let android_bounds = {
+            let bar = Self::android_chat_bar(&self.settings, batch.scale);
+            screen.set_mobile_bar(&m, Some(bar));
+            screen.bar_bounds()
+        };
         // Options.getBackgroundColor(Integer.MIN_VALUE).
         let background = if self.settings.file.bool("backgroundForChatOnly") {
             i32::MIN
@@ -1771,6 +1861,39 @@ impl Game<'_> {
         let draws = screen.draw(&m, mouse, blink, background);
         self.ui.chat_screen = Some(screen);
         let tooltip = horizon_client::screen_draw::paint(batch, &self.gui.atlas, &draws);
+        #[cfg(target_os = "android")]
+        {
+            let a = &self.gui.atlas;
+            for (idx, (label, [bx, by, bw, bh])) in
+                Self::android_chat_buttons(android_bounds).into_iter().enumerate()
+            {
+                let bg = if idx == 4 {
+                    horizon_client::hud::rgba(32, 118, 56, 215)
+                } else {
+                    horizon_client::hud::rgba(18, 18, 24, 195)
+                };
+                let border = horizon_client::hud::rgba(220, 220, 230, 195);
+                batch.fill(a, bx, by, bw, bh, bg);
+                batch.fill(a, bx, by, bw, 1.0, border);
+                batch.fill(a, bx, by + bh - 1.0, bw, 1.0, border);
+                batch.fill(a, bx, by, 1.0, bh, border);
+                batch.fill(a, bx + bw - 1.0, by, 1.0, bh, border);
+                let tw = HudBatch::text_width(a, label);
+                let scale = ((bw - 3.0) / tw.max(1.0)).min(1.0);
+                let start = batch.vertices.len();
+                batch.text(
+                    a,
+                    label,
+                    bx + (bw - tw) / 2.0,
+                    by + (bh - 8.0) / 2.0,
+                    horizon_client::hud::rgba(255, 255, 255, 245),
+                    true,
+                );
+                if scale < 1.0 {
+                    batch.scale_since(start, bx + bw / 2.0, by + bh / 2.0, scale, scale);
+                }
+            }
+        }
         if in_bed {
             let (w, h) = (batch.width, batch.height);
             let rect = self

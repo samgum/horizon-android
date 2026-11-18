@@ -847,6 +847,8 @@ impl ApplicationHandler for Split<'_> {
         self.turn(0);
         let rendered = Instant::now();
         let presented = self.present();
+        #[cfg(target_os = "android")]
+        crate::entry::notify_android_boot_ready();
         let waited = Instant::now();
         for (k, d) in [rendered - started, presented - rendered, waited - presented]
             .into_iter()

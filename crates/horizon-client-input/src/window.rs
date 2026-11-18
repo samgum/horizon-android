@@ -4,16 +4,28 @@
 //! request/state pair.
 
 /// `Window.calculateScale`: the largest scale that leaves at least 320x240
-/// GUI pixels, capped by `max_scale` (0 = automatic); an odd result is bumped
-/// to even when unicode is enforced.
-pub fn calculate_scale(framebuffer: [i32; 2], max_scale: i32, enforce_unicode: bool) -> i32 {
+/// GUI pixels (or 480x320 in `mobile_auto` when `max_scale == 0`, so high-DPI
+/// phone screens keep comfortable room for containers and touch toolbars),
+/// capped by `max_scale` (0 = automatic); an odd result is bumped to even when
+/// unicode is enforced.
+pub fn calculate_scale_for(
+    framebuffer: [i32; 2],
+    max_scale: i32,
+    enforce_unicode: bool,
+    mobile_auto: bool,
+) -> i32 {
     let [width, height] = framebuffer;
+    let (min_w, min_h) = if mobile_auto && max_scale == 0 {
+        (480, 320)
+    } else {
+        (320, 240)
+    };
     let mut scale = 1;
     while scale != max_scale
         && scale < width
         && scale < height
-        && width / (scale + 1) >= 320
-        && height / (scale + 1) >= 240
+        && width / (scale + 1) >= min_w
+        && height / (scale + 1) >= min_h
     {
         scale += 1;
     }
@@ -21,6 +33,15 @@ pub fn calculate_scale(framebuffer: [i32; 2], max_scale: i32, enforce_unicode: b
         scale += 1;
     }
     scale
+}
+
+pub fn calculate_scale(framebuffer: [i32; 2], max_scale: i32, enforce_unicode: bool) -> i32 {
+    calculate_scale_for(
+        framebuffer,
+        max_scale,
+        enforce_unicode,
+        cfg!(target_os = "android"),
+    )
 }
 
 /// `Window.setGuiScale`: the GUI-scaled size of a framebuffer.

@@ -1351,6 +1351,15 @@ pub struct SuggestionCompletion {
     pub input: String,
 }
 
+/// Mobile chat bar placement (either docked near the top or raised above IME).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MobileChatBar {
+    pub top: bool,
+    pub top_y: i32,
+    pub bottom_inset: i32,
+    pub right_reserve: i32,
+}
+
 /// The open chat screen: vanilla's `ChatScreen` with its `EditBox` and
 /// `CommandSuggestions` (argument colouring, usage lines, parse errors,
 /// the suggestion list, Tab completion, history).
@@ -1384,6 +1393,7 @@ pub struct ChatScreen {
     /// `CommandSuggestions.setRestrictions`: what the Chat option allows.
     pub abilities: ChatAbilities,
     pub layout: SuggestLayout,
+    mobile_bar: Option<MobileChatBar>,
     /// `MouseHandler.lastClick`: a click within 250 ms of the last one on
     /// this screen is a double click.
     last_click: Option<std::time::Instant>,
@@ -1509,6 +1519,7 @@ impl ChatScreen {
             auto_suggestions: true,
             abilities,
             layout: SuggestLayout::CHAT,
+            mobile_bar: None,
             last_click: None,
         };
         s.update_command_info(m, c);
@@ -1548,10 +1559,47 @@ impl ChatScreen {
             auto_suggestions: true,
             abilities: ChatAbilities::new(ChatVisibility::Full),
             layout: SuggestLayout::COMMAND_BLOCK,
+            mobile_bar: None,
             last_click: None,
         };
         s.update_command_info(m, c);
         s
+    }
+    /// Configures mobile docking (either top-bar or above-IME) and updates suggestions.
+    pub fn set_mobile_bar(&mut self, m: &Measure, bar: Option<MobileChatBar>) {
+        if self.mobile_bar == bar {
+            return;
+        }
+        self.mobile_bar = bar;
+        if let Some(b) = bar {
+            let bar_top = self.mobile_bar_top(b);
+            self.input.x = 4;
+            self.input.y = bar_top + 2;
+            self.input.width = (self.width - 8 - b.right_reserve).max(40);
+        } else if self.layout == SuggestLayout::CHAT {
+            self.input.x = 4;
+            self.input.y = self.height - 12;
+            self.input.width = self.width - 4;
+        }
+        if self.suggestions.is_some() {
+            self.show_suggestions(m, false);
+        }
+    }
+    /// Returns `[x0, y0, x1, y1]` of the chat bar background on screen.
+    pub fn bar_bounds(&self) -> [i32; 4] {
+        if let Some(b) = self.mobile_bar {
+            let y0 = self.mobile_bar_top(b);
+            [2, y0, (self.width - 2 - b.right_reserve).max(44), y0 + 14]
+        } else {
+            [2, self.height - 14, self.width - 2, self.height - 2]
+        }
+    }
+    fn mobile_bar_top(&self, b: MobileChatBar) -> i32 {
+        if b.top {
+            b.top_y.max(4)
+        } else {
+            (self.height - b.bottom_inset - 16).max(b.top_y.max(4))
+        }
     }
     pub fn value(&self) -> &str {
         &self.input.value
@@ -1573,6 +1621,7 @@ impl ChatScreen {
             let value = self.input.value.clone();
             let auto = self.auto_suggestions;
             let abilities = self.abilities;
+            let prev_mobile = self.mobile_bar;
             let message = std::mem::take(&mut self.input.message);
             *self = if self.layout == SuggestLayout::CHAT {
                 Self::new(
@@ -1590,6 +1639,9 @@ impl ChatScreen {
             };
             self.auto_suggestions = auto;
             self.input.message = message;
+            if prev_mobile.is_some() {
+                self.set_mobile_bar(m, prev_mobile);
+            }
         }
     }
     /// `ChatScreen.onEdited`.
@@ -1839,11 +1891,6 @@ impl ChatScreen {
             0,
             self.input.screen_x(m, 0) + self.input.inner_width() - width,
         );
-        let y = if self.layout.anchor_to_bottom {
-            self.height - 12
-        } else {
-            72
-        };
         // sortSuggestions: those starting with the word at the cursor first.
         let partial = &value[..byte_at(&value, self.input.cursor)];
         let word = partial[last_word_index(partial)..].to_lowercase();
@@ -1852,13 +1899,20 @@ impl ChatScreen {
                 s.text.starts_with(&word) || s.text.starts_with(&format!("minecraft:{word}"))
             });
         first.extend(rest);
-        // SuggestionsList: beside a bordered box, or over an unbordered one.
         let n = first.len().min(self.layout.line_limit) as i32;
         let bordered = i32::from(self.input.bordered);
-        let top = if self.layout.anchor_to_bottom {
+        let top = if let Some(b) = self.mobile_bar {
+            let bar_top = self.mobile_bar_top(b);
+            if b.top {
+                bar_top + 16
+            } else {
+                (bar_top - 2 - n * 12).max(2)
+            }
+        } else if self.layout.anchor_to_bottom {
+            let y = self.height - 12;
             y - 3 - n * 12
         } else {
-            y - bordered
+            72 - bordered
         };
         let mut l = SuggestionList {
             rect: [x - (1 - bordered), top, width + 1, n * 12],
@@ -2169,10 +2223,11 @@ impl ChatScreen {
         blink_ms: u64,
         background: i32,
     ) -> Vec<Draw> {
-        let (w, h) = (self.width, self.height);
+        let h = self.height;
         let mut out = Vec::new();
-        if self.layout.anchor_to_bottom {
-            d::fill(&mut out, 2, h - 14, w - 2, h - 2, background);
+        if self.layout.anchor_to_bottom || self.mobile_bar.is_some() {
+            let [bx0, by0, bx1, by1] = self.bar_bounds();
+            d::fill(&mut out, bx0, by0, bx1, by1, background);
         }
         let format = |s: &str, o: usize| self.format(s, o);
         self.input.draw(&mut out, m, blink_ms, Some(&format));
@@ -2181,7 +2236,14 @@ impl ChatScreen {
             self.suggestions = Some(l);
         } else {
             for (i, line) in self.usage.iter().enumerate() {
-                let y = if self.layout.anchor_to_bottom {
+                let y = if let Some(b) = self.mobile_bar {
+                    let bar_top = self.mobile_bar_top(b);
+                    if b.top {
+                        bar_top + 16 + 12 * i as i32
+                    } else {
+                        bar_top - 13 - 12 * i as i32
+                    }
+                } else if self.layout.anchor_to_bottom {
                     h - 27 - 12 * i as i32
                 } else {
                     72 + 12 * i as i32

@@ -326,20 +326,7 @@ impl Game<'_> {
             return;
         }
         #[cfg(target_os = "android")]
-        {
-            for ev in crate::entry::drain_android_ime() {
-                match ev {
-                    crate::entry::AndroidImeEvent::Commit(text) => self.ime_commit(&text),
-                    crate::entry::AndroidImeEvent::Preedit(text) => self.ime_preedit(&text, None),
-                    crate::entry::AndroidImeEvent::Backspace => self.ime_backspace(),
-                    crate::entry::AndroidImeEvent::Enter => {
-                        if self.screen == Screen::Chat {
-                            self.chat_key_code(winit::keyboard::KeyCode::Enter, None);
-                        }
-                    }
-                }
-            }
-        }
+        self.drain_android_ime_events();
         if let Some(w) = &self.window {
             if self.options.offscreen {
                 // Offscreen frames don't wait for the window to be drawn: an
@@ -366,6 +353,10 @@ impl Game<'_> {
         }
         // Consume the last frame's result: a hidden compositor may stop sending
         // redraws altogether, leaving a successful result stale indefinitely.
+        #[cfg(target_os = "android")]
+        if self.frame_drawn {
+            crate::entry::notify_android_boot_ready();
+        }
         event_loop.set_control_flow(event_loop::redraw_flow(
             &mut self.frame_drawn,
             self.options.offscreen,
@@ -391,20 +382,7 @@ impl ApplicationHandler for Game<'_> {
                 self.previous = Instant::now();
                 self.sync_android_keep_screen_on();
                 #[cfg(target_os = "android")]
-        {
-            for ev in crate::entry::drain_android_ime() {
-                match ev {
-                    crate::entry::AndroidImeEvent::Commit(text) => self.ime_commit(&text),
-                    crate::entry::AndroidImeEvent::Preedit(text) => self.ime_preedit(&text, None),
-                    crate::entry::AndroidImeEvent::Backspace => self.ime_backspace(),
-                    crate::entry::AndroidImeEvent::Enter => {
-                        if self.screen == Screen::Chat {
-                            self.chat_key_code(winit::keyboard::KeyCode::Enter, None);
-                        }
-                    }
-                }
-            }
-        }
+        self.drain_android_ime_events();
         if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -588,6 +566,17 @@ impl ApplicationHandler for Game<'_> {
 
 #[cfg(target_os = "android")]
 impl Game<'_> {
+    pub(crate) fn drain_android_ime_events(&mut self) {
+        for ev in crate::entry::drain_android_ime() {
+            match ev {
+                crate::entry::AndroidImeEvent::Commit(text) => self.ime_commit(&text),
+                crate::entry::AndroidImeEvent::Preedit(text) => self.ime_preedit(&text, None),
+                crate::entry::AndroidImeEvent::Backspace => self.ime_backspace(),
+                crate::entry::AndroidImeEvent::Enter => self.ime_enter(),
+            }
+        }
+    }
+
     pub(crate) fn sync_android_keep_screen_on(&mut self) {
         let keep_on =
             self.title.is_none() && self.player.is_some() && self.screen != Screen::Paused;

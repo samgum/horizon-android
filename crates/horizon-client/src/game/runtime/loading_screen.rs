@@ -81,14 +81,28 @@ pub(super) struct Loading {
 /// How long the handoff waits for the first title frame before building the
 /// world renderer anyway (a hidden window may never be asked to redraw).
 pub(super) const TITLE_FRAME_WAIT: Duration = Duration::from_secs(1);
+
+#[cfg(target_os = "android")]
+static LAST_ANDROID_BOOT_PCT: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(50);
+
 impl Loading {
     /// The world renderer is built on the main thread, so building it before
     /// the title is on the screen holds the title back by that build. Wait for
     /// one title frame first, unless a world is waiting to open.
+    /// On Android, keep the foolproof boot splash until the world renderer and
+    /// audio are completely built so the main menu never freezes after opening.
     pub(super) fn ready_for_handoff(&self) -> bool {
-        self.title_drawn
-            || self.menu.pending.is_some()
-            || self.ui_at.is_none_or(|at| at.elapsed() >= TITLE_FRAME_WAIT)
+        #[cfg(target_os = "android")]
+        {
+            return self.gui.is_some();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.title_drawn
+                || self.menu.pending.is_some()
+                || self.ui_at.is_none_or(|at| at.elapsed() >= TITLE_FRAME_WAIT)
+        }
     }
     pub(super) fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -191,6 +205,8 @@ impl Loading {
         }
 
         self.window = Some(window);
+        #[cfg(target_os = "android")]
+        crate::entry::notify_android_boot_progress("正在初始化图形渲染窗口…", 55);
     }
     pub(super) fn window_event(
         &mut self,
@@ -249,6 +265,8 @@ impl Loading {
         }
         // The title frame's wait starts once its renderer is built.
         self.ui_at = Some(Instant::now());
+        #[cfg(target_os = "android")]
+        crate::entry::notify_android_boot_progress("正在加载材质图集与方块模型…", 65);
     }
     pub(super) fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // The loop may run once more after exit(): keep the first error, the
@@ -268,6 +286,17 @@ impl Loading {
             return;
         }
         self.poll_menu_realms(event_loop);
+        #[cfg(target_os = "android")]
+        {
+            self.drain_startup_android_ime(event_loop);
+            let frac = self.progress.fraction().clamp(0.0, 1.0);
+            let pct = 56 + (frac * 30.0) as i32;
+            let prev = LAST_ANDROID_BOOT_PCT.load(std::sync::atomic::Ordering::Relaxed);
+            if pct > prev {
+                LAST_ANDROID_BOOT_PCT.store(pct, std::sync::atomic::Ordering::Relaxed);
+                crate::entry::notify_android_boot_progress("正在加载游戏资源与模型…", pct);
+            }
+        }
         if let Some(w) = &self.window {
             if self.options.as_ref().is_some_and(|o| o.offscreen) {
                 self.draw();
@@ -312,6 +341,8 @@ impl Loading {
         }
     }
     pub(super) fn finish(&mut self, mut loaded: Loaded) -> Result<Option<split::Split<'static>>> {
+        #[cfg(target_os = "android")]
+        crate::entry::notify_android_boot_progress("正在编译 3D 渲染管线与着色器…", 90);
         let handoff_at = Instant::now();
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
@@ -352,6 +383,8 @@ impl Loading {
             "Horizon: world renderer ready after {} ms",
             self.started.elapsed().as_millis()
         );
+        #[cfg(target_os = "android")]
+        crate::entry::notify_android_boot_progress("正在初始化音频与主界面…", 96);
         let renderer_ms = renderer_at.elapsed().as_millis();
         // Audio is created on the main thread, after the core is ready.
         let audio = if !options.execution_role.is_client() {
@@ -413,6 +446,8 @@ impl Loading {
             renderer_ms,
             game_ms
         );
+        #[cfg(target_os = "android")]
+        crate::entry::notify_android_boot_progress("准备就绪…", 100);
         Ok(Some(split::Split::new(game)))
     }
 }

@@ -19,6 +19,7 @@
     <application
         android:label="Horizon 26.3"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:hasCode="true"
         android:allowBackup="true"
         android:extractNativeLibs="true"

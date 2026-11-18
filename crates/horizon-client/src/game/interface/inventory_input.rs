@@ -325,6 +325,10 @@ impl Game<'_> {
     /// and a sneak the key no longer held: #4166's in-game report), so a
     /// cached key set is not vanilla's answer.
     pub(super) fn has_shift_down(&self) -> bool {
+        #[cfg(target_os = "android")]
+        if self.touch_shift_override {
+            return true;
+        }
         self.modifiers.shift_key()
     }
     /// The same live word for Control (`InputWithModifiers.hasControlDown`).

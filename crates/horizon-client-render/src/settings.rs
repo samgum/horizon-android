@@ -900,6 +900,12 @@ pub enum Opt {
     /// The stick the radial menu selects with (`PadSettings::radial_stick`).
     PadRadialStick,
     TouchScheme,
+    TouchContainerStyle,
+    TouchChatPosition,
+    TouchDynamicJoystick,
+    TouchSprintMode,
+    TouchOffhandButton,
+    TouchTopShortcuts,
     TouchLeftHanded,
     TouchJoyX,
     TouchJoyY,

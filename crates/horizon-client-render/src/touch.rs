@@ -11,27 +11,32 @@
 //! D-pad, a button, or a look gesture on the world) and keeps it until it
 //! lifts, so moving, looking and pressing never take each other's fingers.
 pub mod aim;
+pub mod container;
 mod draw;
 pub mod layout;
 pub use aim::{
     attack_indicator, camera_delta, hotbar_slot, item_places_entity_on_tap, item_uses_on_tap,
     projectile_crosshair, screen_direction,
 };
-pub use layout::{Control, Mode, Placement, Settings};
+pub use layout::{ChatBarPosition, ContainerTouchStyle, Control, Mode, Placement, Settings};
 
 use crate::gamepad::{Button, PadState};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// A world touch held this long without dragging becomes a hold (mining, eating).
-const HOLD_DELAY: Duration = Duration::from_millis(350);
+const HOLD_DELAY: Duration = Duration::from_millis(320);
+/// Shorter hold delay when drawing a projectile weapon (bow, trident).
+const PROJECTILE_HOLD_DELAY: Duration = Duration::from_millis(180);
 /// How long the marker of a short world tap stays.
 const MARKER_TIME: Duration = Duration::from_millis(180);
 /// Two taps on the D-pad's sneak button closer than this toggle crouching.
-const DOUBLE_TAP: Duration = Duration::from_millis(300);
+const DOUBLE_TAP: Duration = Duration::from_millis(320);
+/// Two taps on Jump closer than this toggle creative flight.
+const DOUBLE_JUMP: Duration = Duration::from_millis(380);
 /// A look finger that moves farther than this (a fraction of the surface
 /// height) is a camera drag, not a tap.
-const DRAG_SLOP: f32 = 0.018;
+const DRAG_SLOP: f32 = 0.011;
 /// The swap-hands action a [`Control::Offhand`] tap sends.
 const SWAP_HANDS: &str = "action:key.swapOffhand";
 
@@ -103,8 +108,13 @@ pub struct TouchControls {
     pub settings_requested: bool,
     pub debug_requested: bool,
     pub perspective_requested: bool,
+    /// Creative `mayfly` ability is active; double-tapping Jump sets `fly_toggle_requested`.
+    pub can_fly: bool,
+    pub fly_toggle_requested: bool,
     /// When true, contextual `Use` targets a mountable entity (show Ride icon).
     pub mount_hint: bool,
+    /// Normalized `[left, top, right, bottom]` safe-area insets (cutouts & system bars).
+    pub safe_insets: [f32; 4],
     /// Normalized `([center_x, center_y], size)` for snapping `Inventory` next to the hotbar.
     pub hotbar_edge: Option<([f32; 2], f32)>,
     fingers: BTreeMap<u64, (Role, [f32; 2])>,
@@ -118,6 +128,7 @@ pub struct TouchControls {
     pending_tap: Option<bool>,
     last_marker: Option<([f32; 2], Instant)>,
     last_sneak_tap: Option<Instant>,
+    last_jump_tap: Option<Instant>,
     sprint_latched: bool,
     aspect: f32,
 }
@@ -256,25 +267,32 @@ impl TouchControls {
         self.settings.visible(c)
             || (c == Control::Use
                 && visibility != layout::HIDDEN
-                && self.settings.contextual_interact
-                && (self.context_use
-                    || self
-                        .fingers
-                        .values()
-                        .any(|(r, _)| matches!(r, Role::Button(Button::LeftTrigger)))))
+                && (self.projectile_crosshair
+                    || (self.settings.contextual_interact
+                        && (self.context_use
+                            || self
+                                .fingers
+                                .values()
+                                .any(|(r, _)| matches!(r, Role::Button(Button::LeftTrigger)))))))
     }
 
     /// Where a control is on this surface: the saved placement, scaled by
-    /// `button_scale` and kept on screen.
+    /// `button_scale` and kept inside safe-area bounds.
     fn placement(&self, c: Control) -> Placement {
         let aspect = self.aspect();
         let mut p = self.settings.placement(c);
+        let default_offhand = layout::DEFAULT_ROW[Control::Offhand as usize];
         let factory_swap = c == Control::Offhand
-            && self.settings.layouts[self.settings.mode.index()][c as usize].center == [0.80, 0.96]
-            && p.size == 0.075;
+            && self.settings.layouts[self.settings.mode.index()][c as usize].center
+                == default_offhand.center
+            && (p.size - default_offhand.size).abs() < 0.0001;
         // On tall surfaces the factory top row would overlap: spread it out.
         // Moved buttons and every landscape layout stay where they were saved.
-        if aspect < 1.0 && p.center[1] == 0.055 && p.size == 0.075 {
+        let default_top = layout::DEFAULT_ROW[Control::Chat as usize];
+        if aspect < 1.0
+            && (p.center[1] - default_top.center[1]).abs() < 0.0001
+            && (p.size - default_top.size).abs() < 0.0001
+        {
             let mirror = |x: f32| {
                 if self.settings.left_handed {
                     1.0 - x
@@ -283,11 +301,11 @@ impl TouchControls {
                 }
             };
             let top = match c {
-                Control::Debug => Some((0.42, 0.18)),
-                Control::Chat => Some((0.46, 0.34)),
-                Control::Pause => Some((0.50, 0.50)),
-                Control::Settings => Some((0.54, 0.66)),
-                Control::Perspective => Some((0.58, 0.82)),
+                Control::Debug => Some((layout::DEFAULT_ROW[Control::Debug as usize].center[0], 0.18)),
+                Control::Chat => Some((layout::DEFAULT_ROW[Control::Chat as usize].center[0], 0.34)),
+                Control::Pause => Some((layout::DEFAULT_ROW[Control::Pause as usize].center[0], 0.50)),
+                Control::Settings => Some((layout::DEFAULT_ROW[Control::Settings as usize].center[0], 0.66)),
+                Control::Perspective => Some((layout::DEFAULT_ROW[Control::Perspective as usize].center[0], 0.82)),
                 _ => None,
             };
             if let Some((old, new)) = top
@@ -298,8 +316,10 @@ impl TouchControls {
             }
         }
         let mut p = self.fit(p);
+        let default_inv = layout::DEFAULT_ROW[Control::Inventory as usize];
         if c == Control::Inventory
-            && self.settings.layouts[self.settings.mode.index()][c as usize].center == [0.68, 0.89]
+            && self.settings.layouts[self.settings.mode.index()][c as usize].center
+                == default_inv.center
             && let Some(([x, y], sz)) = self.hotbar_edge
         {
             p.center = [if self.settings.left_handed { 1.0 - x } else { x }, y];
@@ -311,20 +331,31 @@ impl TouchControls {
             let inventory = self.placement(Control::Inventory);
             let side = if self.settings.left_handed { -1.0 } else { 1.0 };
             let half = p.size / aspect / 2.0;
+            let lo = (self.safe_insets[0].clamp(0.0, 0.3) + half).min(0.5);
+            let hi = (1.0 - self.safe_insets[2].clamp(0.0, 0.3) - half).max(0.5);
             p.center[0] = (inventory.center[0]
                 + side * ((inventory.size + p.size) / 2.0 + 0.015) / aspect)
-                .clamp(half, 1.0 - half);
+                .clamp(lo, hi);
         }
         p
     }
 
-    /// Scales a placement by `button_scale` and keeps it inside the surface.
+    /// Scales a placement by `button_scale` and keeps it inside the safe area.
     fn fit(&self, mut p: Placement) -> Placement {
         let aspect = self.aspect();
         p.size = (p.size * self.settings.button_scale).min(aspect).min(1.0);
         let half = [p.size / aspect / 2.0, p.size / 2.0];
-        for (c, half) in p.center.iter_mut().zip(half) {
-            *c = c.clamp(half, 1.0 - half);
+        let [in_l, in_t, in_r, in_b] = self.safe_insets.map(|v| v.clamp(0.0, 0.25));
+        let bounds = [
+            (in_l + half[0], 1.0 - in_r - half[0]),
+            (in_t + half[1], 1.0 - in_b - half[1]),
+        ];
+        for (c, (lo, hi)) in p.center.iter_mut().zip(bounds) {
+            if lo <= hi {
+                *c = c.clamp(lo, hi);
+            } else {
+                *c = 0.5;
+            }
         }
         p
     }
@@ -396,29 +427,58 @@ impl TouchControls {
         }
         let aspect = self.aspect();
         let attack_look = self.settings.attack_button_look && self.crosshair();
+        let gestures = self.world_gestures();
+        let projectile_aim = self.projectile_crosshair;
+        let dpad_mode = self.settings.mode == Mode::Dpad;
+        let dpad_radius = self.placement(Control::Move).size / 2.0;
+        let mut slid_out_of_dpad_center = false;
         let Some((role, previous)) = self.fingers.get_mut(&id) else {
             return [0.0; 2];
         };
+        let delta = [point[0] - previous[0], point[1] - previous[1]];
+        let step_dist = (delta[0] * aspect).hypot(delta[1]);
         let turns = match role {
             Role::Look {
                 start,
                 since,
                 dragged,
+                held_use,
                 committed,
-                ..
             } => {
-                if !*dragged && since.elapsed() >= HOLD_DELAY {
+                let delay = if projectile_aim && *held_use {
+                    PROJECTILE_HOLD_DELAY
+                } else {
+                    HOLD_DELAY
+                };
+                // Allow bow/trident draw to commit even during slow tracking aim,
+                // as long as the finger isn't making a fast camera flick.
+                if (!*dragged || (projectile_aim && *held_use && step_dist < 0.025))
+                    && since.elapsed() >= delay
+                {
                     *committed = true;
                 }
-                *dragged |= ((point[0] - start[0]) * aspect).hypot(point[1] - start[1]) > DRAG_SLOP;
+                let slop = if gestures { DRAG_SLOP } else { 0.0 };
+                *dragged |= ((point[0] - start[0]) * aspect).hypot(point[1] - start[1]) > slop;
                 *dragged
             }
+            Role::Move(anchor) => {
+                if dpad_mode && dpad_radius > 0.0 {
+                    let dx = ((point[0] - anchor[0]) * aspect / dpad_radius).abs();
+                    let dy = ((anchor[1] - point[1]) / dpad_radius).abs();
+                    if dx >= 1.0 / 3.0 || dy >= 1.0 / 3.0 {
+                        slid_out_of_dpad_center = true;
+                    }
+                }
+                false
+            }
             // In the crosshair schemes the attack button can steer while it mines.
-            Role::Button(Button::RightTrigger) => attack_look,
+            Role::Button(Button::RightTrigger | Button::LeftTrigger) => attack_look,
             _ => false,
         };
-        let delta = [point[0] - previous[0], point[1] - previous[1]];
         *previous = point;
+        if slid_out_of_dpad_center {
+            self.last_sneak_tap = None;
+        }
         if turns { delta } else { [0.0; 2] }
     }
 
@@ -436,7 +496,12 @@ impl TouchControls {
         else {
             return;
         };
-        if self.world_gestures() && !dragged && since.elapsed() < HOLD_DELAY {
+        let delay = if self.projectile_crosshair && held_use {
+            PROJECTILE_HOLD_DELAY
+        } else {
+            HOLD_DELAY
+        };
+        if self.world_gestures() && !dragged && since.elapsed() < delay {
             self.tap_aim = Some(self.aim_at(start));
             self.last_marker = Some((start, Instant::now()));
             self.pending_tap = Some(held_use);
@@ -477,13 +542,30 @@ impl TouchControls {
                 self.perspective_requested = true;
                 Role::Ignore
             }
+            Some(Control::Jump) => {
+                let now = Instant::now();
+                if self.can_fly && !self.swimming && !self.mounted {
+                    if self
+                        .last_jump_tap
+                        .take()
+                        .is_some_and(|t| now.duration_since(t) < DOUBLE_JUMP)
+                    {
+                        self.fly_toggle_requested = true;
+                    } else {
+                        self.last_jump_tap = Some(now);
+                    }
+                }
+                Role::Button(Button::South)
+            }
             Some(Control::Sneak)
                 if self.settings.mode == Mode::Dpad
+                    && !self.settings.swap_jump_sneak
                     && !self.vertical_movement
                     && !self.swimming
                     && !self.mounted =>
             {
-                // The D-pad's centre crouches on a double tap.
+                // The D-pad's centre crouches on a double tap, while still
+                // allowing the thumb to slide outwards onto any direction!
                 let now = Instant::now();
                 if self
                     .last_sneak_tap
@@ -493,7 +575,11 @@ impl TouchControls {
                     Role::Button(Button::RightStick)
                 } else {
                     self.last_sneak_tap = Some(now);
-                    Role::Ignore
+                    if !self.moving() {
+                        Role::Move(self.placement(Control::Move).center)
+                    } else {
+                        Role::Ignore
+                    }
                 }
             }
             Some(Control::Sprint) if self.settings.sprint_toggle => {
@@ -523,6 +609,7 @@ impl TouchControls {
     pub fn clear(&mut self) {
         self.fingers.clear();
         self.last_sneak_tap = None;
+        self.last_jump_tap = None;
         self.sprint_latched = false;
         self.pending = PadState::default();
         self.aim = None;
@@ -536,6 +623,7 @@ impl TouchControls {
         self.settings_requested = false;
         self.debug_requested = false;
         self.perspective_requested = false;
+        self.fly_toggle_requested = false;
     }
 
     /// A short world tap since the last call, and whether it uses the item.
@@ -554,21 +642,14 @@ impl TouchControls {
     /// sets [`Self::aim`], [`Self::holding`] and [`Self::holding_use`].
     pub fn poll_state(&mut self) -> PadState {
         let mut state = self.state().merge(&std::mem::take(&mut self.pending));
-        if let Some(tap) = self.tap_aim.take() {
-            self.aim = Some(tap);
-            self.aim_until = Some(Instant::now() + Duration::from_millis(120));
-        } else if self
-            .aim_until
-            .is_some_and(|until| Instant::now() >= until)
-        {
-            self.aim = None;
-            self.aim_until = None;
-        }
+        self.aim = self.tap_aim.take();
+        self.aim_until = None;
         self.holding_use = false;
         self.holding = false;
         if !self.world_gestures() {
             return state;
         }
+        let projectile_aim = self.projectile_crosshair;
         let mut hold = None;
         for (role, point) in self.fingers.values_mut() {
             if let Role::Look {
@@ -579,7 +660,12 @@ impl TouchControls {
                 ..
             } = role
             {
-                if !*dragged && since.elapsed() >= HOLD_DELAY {
+                let delay = if projectile_aim && *held_use {
+                    PROJECTILE_HOLD_DELAY
+                } else {
+                    HOLD_DELAY
+                };
+                if !*dragged && since.elapsed() >= delay {
                     *committed = true;
                 }
                 if !*dragged || *committed {

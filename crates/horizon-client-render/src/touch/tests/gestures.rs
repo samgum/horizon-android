@@ -157,9 +157,10 @@ fn crosshair_gestures_aim_at_the_centre() {
         let mut t = TouchControls::default();
         t.settings.mode = mode;
         t.settings.split_controls = split;
+        t.settings.crosshair_gestures = false;
         t.update(1, [0.6, 0.4], true, false);
         t.update(1, [0.6, 0.4], false, true);
-        assert_eq!(t.take_tap(), None, "off by default");
+        assert_eq!(t.take_tap(), None, "off when disabled");
         t.settings.crosshair_gestures = true;
         t.update(2, [0.6, 0.4], true, false);
         t.update(2, [0.6, 0.4], false, true);
@@ -192,6 +193,7 @@ fn a_tap_aims_where_it_lands_and_a_drag_only_turns() {
 fn the_attack_button_can_turn_the_camera_while_mining() {
     for enabled in [true, false] {
         let mut t = TouchControls::default();
+        t.settings.mode = Mode::Crosshair;
         t.settings.attack_button_look = enabled;
         let start = t.placement(Control::Attack).center;
         t.update(1, start, true, false);

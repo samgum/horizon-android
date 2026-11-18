@@ -16,27 +16,56 @@ use std::path::Path;
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     /// A joystick moves; attack and use act on the crosshair.
-    #[default]
     Crosshair,
     /// A joystick moves; tapping the world attacks or uses what was tapped.
+    #[default]
     Tap,
     /// A D-pad moves; tapping the world acts on it (or the crosshair, split).
     Dpad,
+}
+
+/// How container screens (inventory, chest, crafting, creative) respond to touch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContainerTouchStyle {
+    /// Bedrock-style touch: long-press green split bar, side `[⇧]`/`[½]`/`[🗑]` toolbar,
+    /// and outside-tap drop protection.
+    #[default]
+    Bedrock,
+    /// Desktop-like container clicks with fixed long-press right-click (half split)
+    /// and an optional `[⇧]` Shift toggle.
+    Classic,
+}
+
+/// Where the chat input bar sits while typing on touch devices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatBarPosition {
+    /// Docked near the top of the screen so no soft keyboard can cover it,
+    /// with command suggestions expanding downward.
+    #[default]
+    Top,
+    /// Rises dynamically to sit just above the soft keyboard (`WindowInsets.ime()`).
+    FollowKeyboard,
 }
 
 impl Mode {
     pub const ALL: [Self; 3] = [Self::Crosshair, Self::Tap, Self::Dpad];
     /// The four schemes a settings screen offers: mode, `split_controls`, label.
     pub const SCHEMES: [(Self, bool, &'static str); 4] = [
-        (Self::Crosshair, false, "Joystick & aim crosshair"),
         (Self::Tap, false, "Joystick & tap to interact"),
+        (Self::Crosshair, false, "Joystick & aim crosshair"),
         (Self::Dpad, false, "D-Pad & tap to interact"),
         (Self::Dpad, true, "D-Pad & aim crosshair"),
     ];
 
     /// This mode's row in [`Settings::layouts`].
     pub fn index(self) -> usize {
-        self as usize
+        match self {
+            Self::Crosshair => 0,
+            Self::Tap => 1,
+            Self::Dpad => 2,
+        }
     }
 }
 
@@ -195,29 +224,35 @@ pub struct Settings {
     pub button_scale: f32,
     /// The touch marker's diameter in GUI pixels (16-64).
     pub circle_size: f32,
+    /// Container interaction style (`Bedrock` by default, switchable to `Classic`).
+    pub container_style: ContainerTouchStyle,
+    /// Chat input bar docking (`Top` by default, switchable to `FollowKeyboard`).
+    pub chat_position: ChatBarPosition,
 }
+
+/// Ergonomic non-overlapping factory placements for landscape surfaces.
+pub const DEFAULT_ROW: [Placement; CONTROLS] = [
+    Placement::new(0.145, 0.72, 0.27),  // Move
+    Placement::new(0.76, 0.43, 0.10),   // Sprint
+    Placement::new(0.88, 0.74, 0.145),  // Jump
+    Placement::new(0.78, 0.81, 0.110),  // Sneak
+    Placement::new(0.75, 0.62, 0.135),  // Attack
+    Placement::new(0.88, 0.49, 0.140),  // Use (contextual / crosshair)
+    Placement::new(0.465, 0.058, 0.068), // Chat
+    Placement::new(0.535, 0.058, 0.068), // Pause
+    Placement::new(0.605, 0.058, 0.068), // Settings
+    Placement::new(0.68, 0.89, 0.08),   // Inventory
+    Placement::new(0.395, 0.058, 0.068), // Debug
+    Placement::new(0.675, 0.058, 0.068), // Perspective
+    Placement::new(0.78, 0.95, 0.075),  // Offhand
+    Placement::new(0.89, 0.31, 0.110),  // Shield
+];
 
 impl Default for Settings {
     fn default() -> Self {
-        let row = [
-            Placement::new(0.145, 0.72, 0.27),  // Move
-            Placement::new(0.75, 0.67, 0.10),   // Sprint
-            Placement::new(0.88, 0.74, 0.145),  // Jump
-            Placement::new(0.77, 0.81, 0.115),  // Sneak
-            Placement::new(0.78, 0.52, 0.135),  // Attack
-            Placement::new(0.80, 0.56, 0.155),  // Use (contextual / crosshair)
-            Placement::new(0.465, 0.058, 0.068), // Chat
-            Placement::new(0.535, 0.058, 0.068), // Pause
-            Placement::new(0.605, 0.058, 0.068), // Settings
-            Placement::new(0.68, 0.89, 0.08),   // Inventory
-            Placement::new(0.395, 0.058, 0.068), // Debug
-            Placement::new(0.675, 0.058, 0.068), // Perspective
-            Placement::new(0.78, 0.90, 0.075),  // Offhand
-            Placement::new(0.89, 0.38, 0.115),  // Shield
-        ];
-        let mut layouts = [row; 3];
-        // The D-pad sits where the joystick does; sneak becomes its centre.
-        layouts[Mode::Dpad.index()][Control::Sneak as usize] = Placement::new(0.14, 0.72, 0.10);
+        let mut layouts = [DEFAULT_ROW; 3];
+        // The D-pad sits where the joystick does; sneak becomes its exact centre.
+        layouts[Mode::Dpad.index()][Control::Sneak as usize] = Placement::new(0.145, 0.72, 0.10);
         layouts[Mode::Dpad.index()][Control::Jump as usize] = Placement::new(0.88, 0.76, 0.14);
         let mut button_visibility = [FOLLOW_SCHEME; CONTROLS];
         button_visibility[Control::Debug as usize] = HIDDEN;
@@ -246,6 +281,8 @@ impl Default for Settings {
             dynamic_area_y: 1.0,
             button_scale: 1.0,
             circle_size: 32.0,
+            container_style: ContainerTouchStyle::Bedrock,
+            chat_position: ChatBarPosition::Top,
         }
     }
 }
@@ -369,13 +406,18 @@ mod tests {
     #[test]
     fn scheme_decides_attack_use_sprint_and_shield() {
         let mut s = Settings::default();
+        assert_eq!(s.mode, Mode::Tap);
+        assert_eq!(s.container_style, ContainerTouchStyle::Bedrock);
+        assert_eq!(s.chat_position, ChatBarPosition::Top);
+        assert!(!s.visible(Control::Attack) && !s.visible(Control::Use));
+        assert!(s.visible(Control::Shield));
+        s.mode = Mode::Crosshair;
+        s.sprint_button = true;
+        s.sprint_with_joystick = false;
         assert!(s.visible(Control::Attack) && s.visible(Control::Use));
         assert!(s.visible(Control::Sprint));
         // The shield button only stands in when Use is hidden.
         assert!(!s.visible(Control::Shield));
-        s.mode = Mode::Tap;
-        assert!(!s.visible(Control::Attack) && !s.visible(Control::Use));
-        assert!(s.visible(Control::Shield));
         s.mode = Mode::Dpad;
         assert!(!s.visible(Control::Sprint));
         s.split_controls = true;
@@ -384,6 +426,41 @@ mod tests {
         s.sprint_with_joystick = true;
         assert!(!s.visible(Control::Sprint));
         assert!(!s.visible(Control::Offhand));
+    }
+
+    #[test]
+    fn right_side_action_buttons_do_not_overlap_on_landscape_phones() {
+        let s = Settings {
+            mode: Mode::Crosshair,
+            sprint_button: true,
+            sprint_with_joystick: false,
+            ..Settings::default()
+        };
+        let buttons = [
+            Control::Jump,
+            Control::Attack,
+            Control::Use,
+            Control::Sneak,
+            Control::Sprint,
+            Control::Shield,
+        ];
+        for aspect in [16.0 / 9.0, 20.0 / 9.0, 21.0 / 9.0] {
+            for i in 0..buttons.len() {
+                for j in (i + 1)..buttons.len() {
+                    let a = s.placement(buttons[i]).rect(aspect);
+                    let b = s.placement(buttons[j]).rect(aspect);
+                    let overlaps = a[0] < b[0] + b[2]
+                        && b[0] < a[0] + a[2]
+                        && a[1] < b[1] + b[3]
+                        && b[1] < a[1] + a[3];
+                    assert!(
+                        !overlaps,
+                        "aspect {aspect:.2}: {:?} overlaps {:?}",
+                        buttons[i], buttons[j]
+                    );
+                }
+            }
+        }
     }
 
     #[test]
