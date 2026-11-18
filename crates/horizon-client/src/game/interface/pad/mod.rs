@@ -585,8 +585,13 @@ impl Game<'_> {
                 .player
                 .as_ref()
                 .is_some_and(|p| p.may_fly && !p.spectator);
+            let prev_vertical = self.touch.vertical_movement;
             self.touch.swimming = swimming;
             self.touch.vertical_movement = flying || swimming;
+            if !prev_vertical && self.touch.vertical_movement && self.toggles.0[SNEAK].down() {
+                self.toggles.0[SNEAK].set_down(false, false);
+                self.sync_toggle(SNEAK);
+            }
             self.touch.can_fly = may_fly;
             self.touch.mounted = self.riding.is_some();
             self.touch.sneaking = self.keys.held(Action::Sneak);
@@ -955,14 +960,16 @@ impl Game<'_> {
                 Ok(())
             }
             Route::Sneak
-                if (self.settings.controller.toggle_sneak || {
+                if ({
                     #[cfg(target_os = "android")]
                     {
-                        !self.touch.vertical_movement && !self.touch.mounted
+                        !self.touch.vertical_movement
+                            && !self.touch.mounted
+                            && (!self.touch.auxiliary_only || self.settings.controller.toggle_sneak)
                     }
                     #[cfg(not(target_os = "android"))]
                     {
-                        false
+                        self.settings.controller.toggle_sneak
                     }
                 }) && !self.settings.toggle_crouch =>
             {

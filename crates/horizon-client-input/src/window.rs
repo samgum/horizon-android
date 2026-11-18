@@ -12,14 +12,10 @@ pub fn calculate_scale_for(
     framebuffer: [i32; 2],
     max_scale: i32,
     enforce_unicode: bool,
-    mobile_auto: bool,
+    _mobile_auto: bool,
 ) -> i32 {
     let [width, height] = framebuffer;
-    let (min_w, min_h) = if mobile_auto && max_scale == 0 {
-        (480, 320)
-    } else {
-        (320, 240)
-    };
+    let (min_w, min_h) = (320, 240);
     let mut scale = 1;
     while scale != max_scale
         && scale < width

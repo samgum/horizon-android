@@ -62,12 +62,20 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 public class HorizonActivity extends NativeActivity {
+    static {
+        try {
+            System.loadLibrary("horizon_android");
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static final String KEYSTORE_PROVIDER = "AndroidKeyStore";
     private static final String KEYSTORE_ALIAS = "horizon_msa_secrets_v1";
     private static final String SECRETS_PREFS = "horizon_auth_secrets";
 
     private InputBridgeView imeView;
     private BootSplashView bootSplashView;
+    private android.app.Dialog bootSplashDialog;
     private ClipboardManager clipboardManager;
     private SharedPreferences secretPrefs;
     private AlertDialog accountDialog;
@@ -129,13 +137,31 @@ public class HorizonActivity extends NativeActivity {
 
         if (!bootDismissed) {
             bootSplashView = new BootSplashView(this);
-            addContentView(
-                bootSplashView,
-                new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
+            bootSplashDialog = new android.app.Dialog(
+                this,
+                android.R.style.Theme_Black_NoTitleBar_Fullscreen
             );
+            bootSplashDialog.setCancelable(false);
+            bootSplashDialog.setCanceledOnTouchOutside(false);
+            bootSplashDialog.setContentView(bootSplashView);
+            Window dlgWin = bootSplashDialog.getWindow();
+            if (dlgWin != null) {
+                dlgWin.addFlags(
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_FULLSCREEN
+                );
+                if (Build.VERSION.SDK_INT >= 28) {
+                    WindowManager.LayoutParams lp = dlgWin.getAttributes();
+                    lp.layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                    dlgWin.setAttributes(lp);
+                }
+            }
+            try {
+                bootSplashDialog.show();
+            } catch (Throwable ignored) {
+            }
         }
 
         configureImmersiveWindow();
@@ -198,8 +224,10 @@ public class HorizonActivity extends NativeActivity {
                     cRight = cutout.right;
                     cBottom = cutout.bottom;
                     Insets gesture = insets.getInsets(WindowInsets.Type.systemGestures());
+                    Insets mandatory = insets.getInsets(WindowInsets.Type.mandatorySystemGestures());
                     gLeft = gesture.left;
                     gRight = gesture.right;
+                    cBottom = Math.max(cBottom, Math.max(gesture.bottom, mandatory.bottom));
                     Insets ime = insets.getInsets(WindowInsets.Type.ime());
                     imeBottom = ime.bottom;
                 } else {
@@ -214,6 +242,7 @@ public class HorizonActivity extends NativeActivity {
                         Insets gesture = insets.getSystemGestureInsets();
                         gLeft = gesture.left;
                         gRight = gesture.right;
+                        cBottom = Math.max(cBottom, gesture.bottom);
                     }
                     Rect visible = new Rect();
                     v.getWindowVisibleDisplayFrame(visible);
@@ -222,7 +251,10 @@ public class HorizonActivity extends NativeActivity {
                         imeBottom = rootH - visible.bottom;
                     }
                 }
-                nativeOnWindowInsets(cLeft, cTop, cRight, cBottom, gLeft, gRight, imeBottom);
+                try {
+                    nativeOnWindowInsets(cLeft, cTop, cRight, cBottom, gLeft, gRight, imeBottom);
+                } catch (UnsatisfiedLinkError ignored) {
+                }
                 return insets;
             }
         });
@@ -851,27 +883,38 @@ public class HorizonActivity extends NativeActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                final android.app.Dialog dlg = bootSplashDialog;
+                bootSplashDialog = null;
                 final BootSplashView view = bootSplashView;
                 bootSplashView = null;
-                if (view == null) return;
-                view.setClickable(false);
-                view.setFocusable(false);
-                view.animate()
-                    .alpha(0f)
-                    .setDuration(180L)
-                    .withEndAction(new Runnable() {
-                        @Override
-                        public void run() {
-                            view.setVisibility(View.GONE);
-                            ViewParent parent = view.getParent();
-                            if (parent instanceof ViewGroup) {
-                                ((ViewGroup) parent).removeView(view);
-                            }
+                if (view != null) {
+                    view.setClickable(false);
+                    view.setFocusable(false);
+                }
+                if (dlg != null) {
+                    try {
+                        if (dlg.isShowing()) {
+                            dlg.dismiss();
                         }
-                    })
-                    .start();
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (bootSplashDialog != null) {
+            try {
+                if (bootSplashDialog.isShowing()) {
+                    bootSplashDialog.dismiss();
+                }
+            } catch (Throwable ignored) {
+            }
+            bootSplashDialog = null;
+        }
+        super.onDestroy();
     }
 
     public void setImeActive(final boolean active) {
