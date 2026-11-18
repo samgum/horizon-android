@@ -63,7 +63,6 @@ public class HorizonLaunchActivity extends Activity {
             }
         }
         super.onCreate(savedInstanceState);
-        configureImmersiveWindow();
 
         if (isResourcesReady() || hasBundledAssetsZip()) {
             launchGameActivity();
@@ -71,6 +70,7 @@ public class HorizonLaunchActivity extends Activity {
         }
 
         buildSetupUi();
+        configureImmersiveWindow();
     }
 
     @Override
@@ -83,20 +83,21 @@ public class HorizonLaunchActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     private void configureImmersiveWindow() {
-        final Window window = getWindow();
-        if (window == null) return;
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false);
-            WindowInsetsController ic = window.getInsetsController();
-            if (ic != null) {
-                ic.setSystemBarsBehavior(
-                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                );
-                ic.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-            }
-        } else {
-            View decor = window.getDecorView();
-            if (decor != null) {
+        try {
+            final Window window = getWindow();
+            if (window == null) return;
+            final View decor = window.getDecorView();
+            if (decor == null) return;
+            if (Build.VERSION.SDK_INT >= 30) {
+                window.setDecorFitsSystemWindows(false);
+                WindowInsetsController ic = window.getInsetsController();
+                if (ic != null) {
+                    ic.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    );
+                    ic.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                }
+            } else {
                 decor.setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -106,6 +107,7 @@ public class HorizonLaunchActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
                 );
             }
+        } catch (Throwable ignored) {
         }
     }
 
