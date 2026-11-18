@@ -68,7 +68,7 @@ impl DebugHost for Host<'_, '_> {
 
 impl Game<'_> {
     /// `DebugScreenEntryList.setOverlayVisible`: rebuild on each visibility transition.
-    fn set_debug_overlay(&mut self, visible: bool) {
+    pub(super) fn set_debug_overlay(&mut self, visible: bool) {
         if self.debug != visible {
             self.debug = visible;
             self.debug_entries.invalidate();

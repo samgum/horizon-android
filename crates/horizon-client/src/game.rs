@@ -9166,9 +9166,10 @@ impl Game<'_> {
         }
         if self.title_input_active() && self.screen != Screen::Options {
             if let Some(title) = &mut self.title {
-                let action = title.escape();
-                let _ = self.title_action(event_loop, action);
+                title.escape();
             }
+            let _ = self.reopen_data_packs(event_loop);
+            self.save_title_options();
             return;
         }
         let _ = self.key_pressed(KeyCode::Escape, KeyCode::Escape);

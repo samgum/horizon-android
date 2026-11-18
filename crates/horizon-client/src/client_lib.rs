@@ -23,7 +23,8 @@ mod test_log;
 #[cfg(test)]
 mod test_resources;
 pub use horizon_client_render::{
-    assets, atlas_sources, audio, auth, autotune, ban_notice, bidi, biome, block_edit,
+    android_gamepad, android_runtime, assets, atlas_sources, audio, auth, autotune, ban_notice,
+    bidi, biome, block_edit,
     block_entities, block_entity_anim, block_entity_render, block_sprites, block_states, bluemap,
     bluemap_detect, border_render, breaking, brewing, camera, chat, chunk, chunk_map, cit,
     cit_armor, cit_assets, cit_glint, client_resources, clouds, collisions, command_block,
